@@ -424,6 +424,7 @@ impl AynimeApp {
         self.recorded_frames.clear();
         self.record_start = Some(Instant::now());
         self.last_frame_time = None;
+        overlay::window::hide_cursor();
         log::info!(
             "Recording started. Region: {:?}, Screen: {:?}",
             self.region,
@@ -435,6 +436,7 @@ impl AynimeApp {
 
     fn stop_recording(&mut self) {
         self.is_recording = false;
+        overlay::window::show_cursor();
         let frame_count = self.recorded_frames.len();
 
         if frame_count == 0 {
@@ -541,9 +543,7 @@ impl AynimeApp {
             }
         }
 
-        overlay::window::hide_cursor();
         let frame_result = capturer.capture_frame();
-        overlay::window::show_cursor();
 
         if let Ok(Some(frame)) = frame_result {
             let (rgba, w, h) = self.region.extract_from_frame(&frame);

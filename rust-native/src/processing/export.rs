@@ -362,35 +362,71 @@ pub fn encode_gif(
     frames: &[(Vec<u8>, u32, u32)],
     fps: u32,
     output_path: &Path,
-    _max_size_bytes: Option<u64>,
+    max_size_bytes: Option<u64>,
 ) -> Result<()> {
     if frames.is_empty() {
         anyhow::bail!("No frames to encode");
     }
 
-    let (_, width, height) = &frames[0];
-    let width = *width;
-    let height = *height;
+    let (_, orig_w, orig_h) = &frames[0];
+    let orig_w = *orig_w;
+    let orig_h = *orig_h;
 
-    if width < 2 || height < 2 {
+    if orig_w < 2 || orig_h < 2 {
         anyhow::bail!(
             "Frame dimensions too small for encoding: {}x{} (minimum 2x2)",
-            width,
-            height
+            orig_w,
+            orig_h
         );
     }
 
-    log::info!(
-        "Encoding GIF (gifski): {}x{}, {} frames @ {} fps",
-        width,
-        height,
-        frames.len(),
-        fps
-    );
+    // サイズ制限がある場合、解像度を段階的に下げてリトライ
+    // 100% → 75% → 50% → 37% → 25%
+    let scale_steps: &[f64] = &[1.0, 0.75, 0.5, 0.375, 0.25];
 
+    for &scale in scale_steps {
+        let w = ((orig_w as f64 * scale) as u32).max(2) & !1; // 偶数に丸める
+        let h = ((orig_h as f64 * scale) as u32).max(2) & !1;
+
+        log::info!(
+            "Encoding GIF (gifski): {}x{} (scale {:.0}%), {} frames @ {} fps",
+            w, h, scale * 100.0, frames.len(), fps,
+        );
+
+        encode_gif_once(frames, fps, output_path, w, h)?;
+
+        // サイズ制限チェック
+        if let Some(max_size) = max_size_bytes {
+            let file_size = std::fs::metadata(output_path)
+                .map(|m| m.len())
+                .unwrap_or(0);
+            if file_size > max_size && scale > 0.25 {
+                log::info!(
+                    "GIF size {} bytes exceeds limit {} bytes, scaling down...",
+                    file_size, max_size,
+                );
+                continue;
+            }
+        }
+        break;
+    }
+
+    log::info!("GIF encoding complete: {}", output_path.display());
+    Ok(())
+}
+
+/// gifski による 1 回分の GIF エンコード。
+/// gifski の width/height 指定でリサイズされるため、元フレームをそのまま渡せる。
+fn encode_gif_once(
+    frames: &[(Vec<u8>, u32, u32)],
+    fps: u32,
+    output_path: &Path,
+    target_width: u32,
+    target_height: u32,
+) -> Result<()> {
     let settings = gifski::Settings {
-        width: Some(width),
-        height: Some(height),
+        width: Some(target_width),
+        height: Some(target_height),
         quality: 90,
         fast: true,
         repeat: gifski::Repeat::Infinite,
@@ -443,7 +479,6 @@ pub fn encode_gif(
         .join()
         .map_err(|_| anyhow::anyhow!("Writer thread panicked"))??;
 
-    log::info!("GIF encoding complete: {}", output_path.display());
     Ok(())
 }
 
@@ -548,49 +583,76 @@ pub fn encode_gif_fast(
     frames: &[(Vec<u8>, u32, u32)],
     fps: u32,
     output_path: &Path,
+    max_size_bytes: Option<u64>,
 ) -> Result<()> {
     use image::codecs::gif::{GifEncoder, Repeat};
+    use image::imageops::FilterType;
     use image::{Delay, Frame};
 
     if frames.is_empty() {
         anyhow::bail!("No frames to encode");
     }
 
-    let (_, width, height) = &frames[0];
-    let width = *width;
-    let height = *height;
+    let (_, orig_w, orig_h) = &frames[0];
+    let orig_w = *orig_w;
+    let orig_h = *orig_h;
 
-    log::info!(
-        "Encoding GIF (fast/NeuQuant): {}x{}, {} frames @ {} fps",
-        width,
-        height,
-        frames.len(),
-        fps
-    );
-
-    let file = std::fs::File::create(output_path)
-        .with_context(|| format!("Failed to create {}", output_path.display()))?;
-    let mut encoder = GifEncoder::new_with_speed(file, 10); // speed 1-30, 10=fast
-    encoder
-        .set_repeat(Repeat::Infinite)
-        .context("Failed to set GIF repeat")?;
+    // サイズ制限がある場合、解像度を段階的に下げてリトライ
+    let scale_steps: &[f64] = &[1.0, 0.75, 0.5, 0.375, 0.25];
 
     // GIF のフレーム遅延は 1/100 秒単位
     let delay_cs = (100.0 / fps as f64).round() as u32;
     let delay = Delay::from_numer_denom_ms(delay_cs * 10, 1);
 
-    let gif_frames: Vec<Frame> = frames
-        .iter()
-        .map(|(data, w, h)| {
-            let buf: RgbaImage = ImageBuffer::from_raw(*w, *h, data.clone())
-                .expect("Failed to create image buffer");
-            Frame::from_parts(buf, 0, 0, delay.clone())
-        })
-        .collect();
+    for &scale in scale_steps {
+        let w = ((orig_w as f64 * scale) as u32).max(2) & !1;
+        let h = ((orig_h as f64 * scale) as u32).max(2) & !1;
 
-    encoder
-        .encode_frames(gif_frames)
-        .context("Failed to encode GIF frames")?;
+        log::info!(
+            "Encoding GIF (fast/NeuQuant): {}x{} (scale {:.0}%), {} frames @ {} fps",
+            w, h, scale * 100.0, frames.len(), fps,
+        );
+
+        let file = std::fs::File::create(output_path)
+            .with_context(|| format!("Failed to create {}", output_path.display()))?;
+        let mut encoder = GifEncoder::new_with_speed(file, 10);
+        encoder
+            .set_repeat(Repeat::Infinite)
+            .context("Failed to set GIF repeat")?;
+
+        let gif_frames: Vec<Frame> = frames
+            .iter()
+            .map(|(data, fw, fh)| {
+                let buf: RgbaImage = ImageBuffer::from_raw(*fw, *fh, data.clone())
+                    .expect("Failed to create image buffer");
+                if w == *fw && h == *fh {
+                    Frame::from_parts(buf, 0, 0, delay.clone())
+                } else {
+                    let resized = image::imageops::resize(&buf, w, h, FilterType::Triangle);
+                    Frame::from_parts(resized, 0, 0, delay.clone())
+                }
+            })
+            .collect();
+
+        encoder
+            .encode_frames(gif_frames)
+            .context("Failed to encode GIF frames")?;
+
+        // サイズ制限チェック
+        if let Some(max_size) = max_size_bytes {
+            let file_size = std::fs::metadata(output_path)
+                .map(|m| m.len())
+                .unwrap_or(0);
+            if file_size > max_size && scale > 0.25 {
+                log::info!(
+                    "GIF (fast) size {} bytes exceeds limit {} bytes, scaling down...",
+                    file_size, max_size,
+                );
+                continue;
+            }
+        }
+        break;
+    }
 
     log::info!("GIF encoding (fast) complete: {}", output_path.display());
     Ok(())
@@ -610,7 +672,7 @@ pub fn encode_video(
         "MP4" => encode_mp4(ffmpeg_path, frames, fps, output_path, max_size_bytes),
         "GIF" => match gif_mode {
             GifQualityMode::Quality => encode_gif(ffmpeg_path, frames, fps, output_path, max_size_bytes),
-            GifQualityMode::Fast => encode_gif_fast(frames, fps, output_path),
+            GifQualityMode::Fast => encode_gif_fast(frames, fps, output_path, max_size_bytes),
         },
         "WEBM" => encode_webm(ffmpeg_path, frames, fps, output_path, max_size_bytes),
         _ => anyhow::bail!("Unsupported video format: {}", format),

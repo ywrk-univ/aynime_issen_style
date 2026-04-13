@@ -6,6 +6,24 @@ use std::path::PathBuf;
 const APP_DIR_NAME: &str = "aynime-issen";
 const CONFIG_FILENAME: &str = "config.json";
 
+/// GIF エンコードモード
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GifQualityMode {
+    /// gifski による高品質エンコード (遅い)
+    Quality,
+    /// image クレートによる高速エンコード (画質は劣る)
+    Fast,
+}
+
+impl GifQualityMode {
+    pub fn label(&self) -> &'static str {
+        match self {
+            GifQualityMode::Quality => "高品質 (gifski)",
+            GifQualityMode::Fast => "爆速 (NeuQuant)",
+        }
+    }
+}
+
 /// Application configuration, persisted as JSON.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -22,6 +40,8 @@ pub struct AppConfig {
     pub default_fps: u32,
     /// Default export format
     pub default_format: String,
+    /// GIF エンコードモード (Quality / Fast)
+    pub gif_quality_mode: GifQualityMode,
 }
 
 impl Default for AppConfig {
@@ -42,6 +62,7 @@ impl Default for AppConfig {
             default_max_size_mb: 8.0,
             default_fps: 15,
             default_format: "PNG".into(),
+            gif_quality_mode: GifQualityMode::Quality,
         }
     }
 }

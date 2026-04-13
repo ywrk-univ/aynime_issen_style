@@ -417,6 +417,7 @@ impl AynimeApp {
         let fps = self.record_fps;
         let max_bytes = (self.max_file_size_mb * 1024.0 * 1024.0) as u64;
         let format = self.export_format.clone();
+        let gif_mode = self.config.gif_quality_mode;
         let ext = export::format_extension(&format).to_string();
         let status = self.encode_status.clone();
 
@@ -430,7 +431,7 @@ impl AynimeApp {
         std::thread::spawn(move || {
             let p = output_dir.join(format!("{}.{}", filestem, ext));
             let result =
-                export::encode_video(&ffmpeg_path, &frames, fps, &p, Some(max_bytes), &format)
+                export::encode_video(&ffmpeg_path, &frames, fps, &p, Some(max_bytes), &format, gif_mode)
                     .map(|_| p);
 
             let mut s = status.lock().unwrap();
@@ -781,6 +782,17 @@ impl AynimeApp {
                 }
             });
 
+            // ── GIF Quality Mode ───────────────────────────────
+            ui.horizontal(|ui| {
+                ui.label("GIFモード:");
+                for mode in [config::GifQualityMode::Quality, config::GifQualityMode::Fast] {
+                    let selected = self.config.gif_quality_mode == mode;
+                    if ui.selectable_label(selected, mode.label()).clicked() {
+                        self.config.gif_quality_mode = mode;
+                    }
+                }
+            });
+
             // ── Default max size ────────────────────────────────
             ui.horizontal(|ui| {
                 ui.label("デフォルト最大サイズ:");
@@ -880,6 +892,8 @@ impl AynimeApp {
             ui.label("  eframe/egui (MIT/Apache-2.0) - GUI");
             ui.label("  windows-rs (MIT/Apache-2.0) - Win32 API");
             ui.label("  image (MIT/Apache-2.0) - 画像処理");
+            ui.label("  gifski (AGPL-3.0) - 高品質GIFエンコード");
+            ui.label("  imagequant (GPL-3.0) - 色量子化 (gifski依存)");
         });
     }
 }

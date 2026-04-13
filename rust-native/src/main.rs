@@ -655,14 +655,91 @@ impl eframe::App for AynimeApp {
                 ));
             }
 
-            // ── Status ──────────────────────────────────────────────
+            // ── Status message ───────────────────────────────────────
             if !self.status_message.is_empty() {
                 ui.separator();
                 ui.label(&self.status_message);
             }
+
+            ui.separator();
+
+            // ── ステータス ──────────────────────────────────────────
+            ui.collapsing("ステータス", |ui| {
+                // バージョン
+                ui.collapsing("バージョン", |ui| {
+                    ui.label(format!("{} v{}", APP_TITLE, env!("CARGO_PKG_VERSION")));
+                    ui.label(format!("画面: {}x{}", self.screen_size.0, self.screen_size.1));
+                    ui.label(format!(
+                        "設定: {}",
+                        config::AppConfig::config_path_display()
+                    ));
+                    ui.label(format!("出力: {}", self.output_dir.display()));
+                    if ui.small_button("設定フォルダを開く").clicked() {
+                        if let Some(dir) = config::AppConfig::config_dir() {
+                            let _ = std::process::Command::new("explorer")
+                                .arg(dir)
+                                .spawn();
+                        }
+                    }
+                    if ui.small_button("出力フォルダを開く").clicked() {
+                        let _ = std::fs::create_dir_all(&self.output_dir);
+                        let _ = std::process::Command::new("explorer")
+                            .arg(&self.output_dir)
+                            .spawn();
+                    }
+                });
+
+                // ライセンス
+                ui.collapsing("ライセンス", |ui| {
+                    ui.label("えぃにめ一閃流奥義「一閃 改」は MIT ライセンスで公開しています。");
+                    ui.separator();
+                    egui::ScrollArea::vertical()
+                        .max_height(150.0)
+                        .show(ui, |ui| {
+                            ui.monospace(MIT_LICENSE_TEXT);
+                        });
+
+                    ui.separator();
+                    ui.label("本ソフトウェアは以下のソフトウェアをサブプロセスとして利用します:");
+                    ui.label("  FFmpeg (GPL v3) - https://ffmpeg.org/");
+                    ui.separator();
+                    ui.label("主要な依存ライブラリ:");
+                    ui.label("  eframe/egui (MIT/Apache-2.0) - GUI");
+                    ui.label("  windows-rs (MIT/Apache-2.0) - Win32 API");
+                    ui.label("  image (MIT/Apache-2.0) - 画像処理");
+                });
+
+                // ショートカット
+                ui.collapsing("ショートカット", |ui| {
+                    ui.label("構え画面:");
+                    ui.label("  ドラッグ - 範囲選択");
+                    ui.label("  Esc / 右クリック - キャンセル");
+                });
+            });
         });
     }
 }
+
+const MIT_LICENSE_TEXT: &str = "\
+Copyright 2025 NU-Pan
+
+Permission is hereby granted, free of charge, to any person obtaining a copy \
+of this software and associated documentation files (the \"Software\"), to deal \
+in the Software without restriction, including without limitation the rights \
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell \
+copies of the Software, and to permit persons to whom the Software is \
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in \
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR \
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, \
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE \
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER \
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, \
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN \
+THE SOFTWARE.";
 
 fn simple_timestamp() -> String {
     use std::time::SystemTime;

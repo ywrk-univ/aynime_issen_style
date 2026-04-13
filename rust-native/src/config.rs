@@ -96,6 +96,16 @@ impl AppConfig {
         }
     }
 
+    /// Display string for the config file path.
+    pub fn config_path_display() -> String {
+        Self::config_path().display().to_string()
+    }
+
+    /// Get the config directory (for opening in explorer).
+    pub fn config_dir() -> Option<PathBuf> {
+        Self::config_path().parent().map(|p| p.to_path_buf())
+    }
+
     /// Get all format names (still + video) in order.
     pub fn all_formats(&self) -> Vec<String> {
         let mut all = self.still_formats.clone();

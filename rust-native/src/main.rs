@@ -841,7 +841,7 @@ impl AynimeApp {
             ui.add_space(4.0);
             egui::ScrollArea::vertical()
                 .id_salt("license_scroll")
-                .max_height(150.0)
+                .max_height(250.0)
                 .show(ui, |ui| {
                     ui.monospace(MIT_LICENSE_TEXT);
                 });

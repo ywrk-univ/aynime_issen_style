@@ -901,22 +901,72 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, \
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN \
 THE SOFTWARE.";
 
-fn simple_timestamp() -> String {
+/// Generate a timestamp in the format used by the original app: YYYY-MM-DD_HH-MM-SS-mmm
+fn nime_timestamp() -> String {
     use std::time::SystemTime;
-    let d = SystemTime::now()
+    let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default();
-    format!("{}", d.as_secs())
+    let total_secs = now.as_secs();
+    let millis = now.subsec_millis();
+
+    // Convert to date/time components (UTC — matches original behavior)
+    let secs_per_day = 86400u64;
+    let days = total_secs / secs_per_day;
+    let day_secs = (total_secs % secs_per_day) as u32;
+    let hour = day_secs / 3600;
+    let min = (day_secs % 3600) / 60;
+    let sec = day_secs % 60;
+
+    // Days since epoch to Y-M-D (simplified Gregorian)
+    let (year, month, day) = days_to_ymd(days);
+
+    format!(
+        "{:04}-{:02}-{:02}_{:02}-{:02}-{:02}-{:03}",
+        year, month, day, hour, min, sec, millis
+    )
 }
 
-/// Generate a filename stem like "anime_title_1776070000" or "capture_1776070000".
+fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
+    // Epoch is 1970-01-01
+    let mut year = 1970u64;
+    loop {
+        let days_in_year = if is_leap(year) { 366 } else { 365 };
+        if days < days_in_year {
+            break;
+        }
+        days -= days_in_year;
+        year += 1;
+    }
+    let month_days: [u64; 12] = if is_leap(year) {
+        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    } else {
+        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    };
+    let mut month = 1u64;
+    for &md in &month_days {
+        if days < md {
+            break;
+        }
+        days -= md;
+        month += 1;
+    }
+    (year, month, days + 1)
+}
+
+fn is_leap(year: u64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+/// Generate a filename stem: "{anime_name}__{timestamp}" or "capture__{timestamp}"
+/// Matches the original Python app's naming convention.
 fn make_filename_stem(anime_title: &str) -> String {
+    let ts = nime_timestamp();
     if anime_title.is_empty() {
-        format!("capture_{}", simple_timestamp())
+        format!("capture__{}", ts)
     } else {
         let sanitized = anime_title::sanitize_for_filename(anime_title);
-        // Truncate to avoid overly long filenames
         let truncated: String = sanitized.chars().take(80).collect();
-        format!("{}_{}", truncated, simple_timestamp())
+        format!("{}__{}", truncated, ts)
     }
 }

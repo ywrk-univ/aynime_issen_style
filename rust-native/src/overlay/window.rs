@@ -2,8 +2,10 @@ use anyhow::{Context, Result};
 use windows::Win32::Foundation::{COLORREF, HWND};
 use windows::Win32::Graphics::Gdi::UpdateWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
-    FindWindowW, GetWindowLongW, LoadCursorW, SetCursor, SetLayeredWindowAttributes,
-    SetWindowDisplayAffinity, SetWindowLongW, GWL_EXSTYLE, IDC_ARROW, LAYERED_WINDOW_ATTRIBUTES_FLAGS,
+    CreateCursor, CopyIcon, FindWindowW, GetWindowLongW, SetLayeredWindowAttributes,
+    SetSystemCursor, SetWindowDisplayAffinity, SetWindowLongW, SystemParametersInfoW,
+    GWL_EXSTYLE, LAYERED_WINDOW_ATTRIBUTES_FLAGS,
+    SPI_SETCURSORS, SYSTEM_CURSOR_ID, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
     WINDOW_DISPLAY_AFFINITY, WS_EX_LAYERED,
 };
 
@@ -21,19 +23,67 @@ pub fn set_exclude_from_capture(hwnd: HWND) -> Result<()> {
     Ok(())
 }
 
-/// Hide the system cursor. Call `show_cursor()` to restore.
+/// 全カーソル種別の ID。SetSystemCursor で透明カーソルに置換する対象。
+const ALL_CURSOR_IDS: &[SYSTEM_CURSOR_ID] = &[
+    SYSTEM_CURSOR_ID(32512), // OCR_NORMAL
+    SYSTEM_CURSOR_ID(32513), // OCR_IBEAM
+    SYSTEM_CURSOR_ID(32514), // OCR_WAIT
+    SYSTEM_CURSOR_ID(32515), // OCR_CROSS
+    SYSTEM_CURSOR_ID(32516), // OCR_UP
+    SYSTEM_CURSOR_ID(32642), // OCR_SIZENWSE
+    SYSTEM_CURSOR_ID(32643), // OCR_SIZENESW
+    SYSTEM_CURSOR_ID(32644), // OCR_SIZEWE
+    SYSTEM_CURSOR_ID(32645), // OCR_SIZENS
+    SYSTEM_CURSOR_ID(32646), // OCR_SIZEALL
+    SYSTEM_CURSOR_ID(32648), // OCR_NO
+    SYSTEM_CURSOR_ID(32649), // OCR_HAND
+    SYSTEM_CURSOR_ID(32650), // OCR_APPSTARTING
+];
+
+/// システム全体のカーソルを透明に置換する。
+/// SetSystemCursor はシステム全体に効くため、カスタムカーソルソフトの
+/// オーバーレイにも対応できる。`show_cursor()` で復元すること。
 pub fn hide_cursor() {
     unsafe {
-        let _ = SetCursor(None);
+        // 1x1 の完全透明カーソルを作成
+        // AND mask: 0xFF = 全ビット透明, XOR mask: 0x00 = 描画なし
+        let and_plane: [u8; 4] = [0xFF; 4];
+        let xor_plane: [u8; 4] = [0x00; 4];
+        let blank = CreateCursor(
+            None,
+            0,
+            0,
+            1,
+            1,
+            and_plane.as_ptr() as *const _,
+            xor_plane.as_ptr() as *const _,
+        );
+        let Ok(blank) = blank else {
+            log::warn!("Failed to create blank cursor");
+            return;
+        };
+
+        // 各カーソル種別を透明カーソルに置換
+        // SetSystemCursor はハンドルの所有権を奪うため、毎回コピーが必要
+        for &id in ALL_CURSOR_IDS {
+            if let Ok(copy) = CopyIcon(std::mem::transmute(blank)) {
+                let _ = SetSystemCursor(std::mem::transmute(copy), id);
+            }
+        }
+        // 元の blank は CopyIcon のソースとして使ったが所有権は残っている
+        // Windows がカーソルリソースを管理するため明示的な破棄は不要
     }
 }
 
-/// Restore the system cursor to the default arrow.
+/// システムカーソルをレジストリのデフォルト（ユーザー設定含む）に復元する。
 pub fn show_cursor() {
     unsafe {
-        if let Ok(cursor) = LoadCursorW(None, IDC_ARROW) {
-            let _ = SetCursor(Some(cursor));
-        }
+        let _ = SystemParametersInfoW(
+            SPI_SETCURSORS,
+            0,
+            None,
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        );
     }
 }
 

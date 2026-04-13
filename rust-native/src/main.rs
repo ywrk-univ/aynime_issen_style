@@ -90,6 +90,14 @@ struct AynimeApp {
     capture_on_select: bool,
 
     config: AppConfig,
+    current_tab: AppTab,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum AppTab {
+    Main,
+    Settings,
+    Status,
 }
 
 struct CapturedImage {
@@ -163,6 +171,7 @@ impl AynimeApp {
             region_border: RegionBorder::new(),
             capture_on_select: true,
             config,
+            current_tab: AppTab::Main,
         }
     }
 
@@ -493,229 +502,369 @@ impl eframe::App for AynimeApp {
 
         // ── Main panel ──────────────────────────────────────────────
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading(APP_TITLE);
+            // ── Tab bar ─────────────────────────────────────────────
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut self.current_tab, AppTab::Main, "「一閃」");
+                ui.selectable_value(&mut self.current_tab, AppTab::Settings, "設定");
+                ui.selectable_value(&mut self.current_tab, AppTab::Status, "ステータス");
+            });
             ui.separator();
 
-            if let Some(err) = &self.capture_error {
-                ui.colored_label(egui::Color32::RED, err.as_str());
-                ui.separator();
+            match self.current_tab {
+                AppTab::Main => self.ui_tab_main(ui, ctx),
+                AppTab::Settings => self.ui_tab_settings(ui),
+                AppTab::Status => self.ui_tab_status(ui),
             }
+        });
+    }
+}
 
-            // ── Region selection ────────────────────────────────────
+// ─── Tab UIs ────────────────────────────────────────────────────────
+
+impl AynimeApp {
+    fn ui_tab_main(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        if let Some(err) = &self.capture_error {
+            ui.colored_label(egui::Color32::RED, err.as_str());
+            ui.separator();
+        }
+
+        // ── Region selection ────────────────────────────────────
+        ui.horizontal(|ui| {
+            if ui
+                .add_sized([120.0, 32.0], egui::Button::new("構え"))
+                .clicked()
+            {
+                self.do_region_selection();
+            }
+            if ui
+                .add_sized([120.0, 32.0], egui::Button::new("構え解除"))
+                .clicked()
+            {
+                self.region =
+                    CaptureRegion::new(0, 0, self.screen_size.0, self.screen_size.1);
+                self.region_border.hide();
+                self.status_message = "構えを解除しました".to_string();
+            }
+            ui.checkbox(&mut self.capture_on_select, "即一閃");
+        });
+
+        ui.label(format!(
+            "範囲: {}x{} @ ({}, {})",
+            self.region.width, self.region.height, self.region.x, self.region.y
+        ));
+
+        ui.separator();
+
+        // ── Format selection ────────────────────────────────────
+        ui.horizontal_wrapped(|ui| {
+            ui.label("形式:");
+            for fmt in &self.config.all_formats() {
+                let selected = self.export_format.eq_ignore_ascii_case(fmt);
+                if ui.selectable_label(selected, fmt).clicked() {
+                    self.export_format = fmt.clone();
+                }
+            }
+        });
+
+        if self.is_video_format() {
+            ui.horizontal(|ui| {
+                ui.label("FPS:");
+                let mut fps = self.record_fps as f32;
+                if ui
+                    .add(egui::Slider::new(&mut fps, 5.0..=30.0))
+                    .changed()
+                {
+                    self.record_fps = fps as u32;
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("最大サイズ:");
+                for &preset in &self.config.max_size_presets_mb {
+                    let label = format!("{:.0}MB", preset);
+                    let selected = (self.max_file_size_mb - preset).abs() < 0.1;
+                    if ui.selectable_label(selected, &label).clicked() {
+                        self.max_file_size_mb = preset;
+                    }
+                }
+            });
+        }
+
+        ui.separator();
+
+        // ── Capture / Record buttons ────────────────────────────
+        let is_encoding = matches!(
+            *self.encode_status.lock().unwrap(),
+            EncodeStatus::Encoding(_)
+        );
+        let is_still = !self.is_video_format();
+
+        if is_still {
             ui.horizontal(|ui| {
                 if ui
-                    .add_sized([120.0, 32.0], egui::Button::new("構え"))
+                    .add_sized([180.0, 40.0], egui::Button::new("「一閃」"))
                     .clicked()
                 {
-                    self.do_region_selection();
+                    self.do_still_capture();
                 }
-                if ui
-                    .add_sized([120.0, 32.0], egui::Button::new("構え解除"))
-                    .clicked()
-                {
-                    self.region = CaptureRegion::new(0, 0, self.screen_size.0, self.screen_size.1);
-                    self.region_border.hide();
-                    self.status_message = "構えを解除しました".to_string();
-                }
-                ui.checkbox(&mut self.capture_on_select, "即一閃");
-            });
-
-            ui.label(format!(
-                "範囲: {}x{} @ ({}, {})",
-                self.region.width, self.region.height, self.region.x, self.region.y
-            ));
-
-            ui.separator();
-
-            // ── Export settings ─────────────────────────────────────
-            ui.collapsing("出力設定", |ui| {
-                // Format selection from config
-                ui.horizontal_wrapped(|ui| {
-                    ui.label("形式:");
-                    for fmt in &self.config.all_formats() {
-                        let selected = self.export_format.eq_ignore_ascii_case(fmt);
-                        if ui.selectable_label(selected, fmt).clicked() {
-                            self.export_format = fmt.clone();
-                        }
-                    }
-                });
-
-                if self.is_video_format() {
-                    ui.horizontal(|ui| {
-                        ui.label("FPS:");
-                        let mut fps = self.record_fps as f32;
-                        if ui.add(egui::Slider::new(&mut fps, 5.0..=30.0)).changed() {
-                            self.record_fps = fps as u32;
-                        }
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("最大サイズ:");
-                        for &preset in &self.config.max_size_presets_mb {
-                            let label = format!("{:.0}MB", preset);
-                            let selected = (self.max_file_size_mb - preset).abs() < 0.1;
-                            if ui.selectable_label(selected, &label).clicked() {
-                                self.max_file_size_mb = preset;
-                            }
-                        }
-                    });
-                }
-
-                ui.horizontal(|ui| {
-                    ui.label("出力先:");
-                    let mut dir_str = self.output_dir.to_string_lossy().to_string();
-                    if ui.text_edit_singleline(&mut dir_str).changed() {
-                        self.output_dir = PathBuf::from(dir_str);
-                    }
-                });
-            });
-
-            ui.separator();
-
-            // ── Capture / Record buttons ────────────────────────────
-            let is_encoding = matches!(
-                *self.encode_status.lock().unwrap(),
-                EncodeStatus::Encoding(_)
-            );
-            let is_still = !self.is_video_format();
-
-            if is_still {
-                ui.horizontal(|ui| {
+                if self.last_capture.is_some() {
                     if ui
-                        .add_sized([180.0, 40.0], egui::Button::new("「一閃」"))
+                        .add_sized([120.0, 40.0], egui::Button::new("収納"))
                         .clicked()
                     {
-                        self.do_still_capture();
+                        self.do_save();
                     }
-                    if self.last_capture.is_some() {
-                        if ui
-                            .add_sized([120.0, 40.0], egui::Button::new("収納"))
-                            .clicked()
-                        {
-                            self.do_save();
-                        }
+                }
+            });
+        } else {
+            ui.horizontal(|ui| {
+                if !self.is_recording {
+                    if ui
+                        .add_enabled(
+                            !is_encoding,
+                            egui::Button::new("キンキン開始")
+                                .min_size(egui::vec2(180.0, 40.0)),
+                        )
+                        .clicked()
+                    {
+                        self.start_recording();
                     }
-                });
-            } else {
-                ui.horizontal(|ui| {
-                    if !self.is_recording {
-                        if ui
-                            .add_enabled(
-                                !is_encoding,
-                                egui::Button::new("キンキン開始").min_size(egui::vec2(180.0, 40.0)),
-                            )
-                            .clicked()
-                        {
-                            self.start_recording();
-                        }
-                    } else {
-                        if ui
-                            .add_sized([180.0, 40.0], egui::Button::new("キンキン停止・収納"))
-                            .clicked()
-                        {
-                            self.stop_recording();
-                        }
+                } else {
+                    if ui
+                        .add_sized(
+                            [180.0, 40.0],
+                            egui::Button::new("キンキン停止・収納"),
+                        )
+                        .clicked()
+                    {
+                        self.stop_recording();
+                    }
 
-                        if let Some(start) = self.record_start {
-                            let elapsed = start.elapsed().as_secs_f32();
-                            ui.label(format!(
-                                "{:.1}秒 / {}フレーム",
-                                elapsed,
-                                self.recorded_frames.len()
-                            ));
+                    if let Some(start) = self.record_start {
+                        let elapsed = start.elapsed().as_secs_f32();
+                        ui.label(format!(
+                            "{:.1}秒 / {}フレーム",
+                            elapsed,
+                            self.recorded_frames.len()
+                        ));
+                    }
+                }
+            });
+
+            if is_encoding {
+                ui.spinner();
+            }
+        }
+
+        ui.separator();
+
+        // ── Preview ─────────────────────────────────────────────
+        if let Some(capture) = &mut self.last_capture {
+            ui.label("プレビュー:");
+            let tex = capture.texture.get_or_insert_with(|| {
+                let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                    [capture.width as usize, capture.height as usize],
+                    &capture.rgba_data,
+                );
+                ctx.load_texture(
+                    "capture_preview",
+                    color_image,
+                    egui::TextureOptions::LINEAR,
+                )
+            });
+
+            let available = ui.available_size();
+            let aspect = capture.width as f32 / capture.height.max(1) as f32;
+            let preview_w = available.x.min(360.0);
+            let preview_h = preview_w / aspect;
+
+            ui.image(egui::load::SizedTexture::new(
+                tex.id(),
+                egui::vec2(preview_w, preview_h),
+            ));
+        }
+
+        // ── Status message ──────────────────────────────────────
+        if !self.status_message.is_empty() {
+            ui.separator();
+            ui.label(&self.status_message);
+        }
+    }
+
+    fn ui_tab_settings(&mut self, ui: &mut egui::Ui) {
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            ui.heading("設定");
+            ui.separator();
+
+            // ── Still formats ───────────────────────────────────
+            ui.label("静止画フォーマット:");
+            let all_still = ["PNG", "WebP", "JPEG", "BMP"];
+            ui.horizontal_wrapped(|ui| {
+                for fmt in &all_still {
+                    let enabled = self
+                        .config
+                        .still_formats
+                        .iter()
+                        .any(|f| f.eq_ignore_ascii_case(fmt));
+                    let mut checked = enabled;
+                    if ui.checkbox(&mut checked, *fmt).changed() {
+                        if checked && !enabled {
+                            self.config.still_formats.push(fmt.to_string());
+                        } else if !checked {
+                            self.config
+                                .still_formats
+                                .retain(|f| !f.eq_ignore_ascii_case(fmt));
                         }
                     }
-                });
+                }
+            });
 
-                if is_encoding {
-                    ui.spinner();
+            ui.add_space(4.0);
+
+            // ── Video formats ───────────────────────────────────
+            ui.label("動画フォーマット:");
+            let all_video = ["GIF", "MP4", "WebM"];
+            ui.horizontal_wrapped(|ui| {
+                for fmt in &all_video {
+                    let enabled = self
+                        .config
+                        .video_formats
+                        .iter()
+                        .any(|f| f.eq_ignore_ascii_case(fmt));
+                    let mut checked = enabled;
+                    if ui.checkbox(&mut checked, *fmt).changed() {
+                        if checked && !enabled {
+                            self.config.video_formats.push(fmt.to_string());
+                        } else if !checked {
+                            self.config
+                                .video_formats
+                                .retain(|f| !f.eq_ignore_ascii_case(fmt));
+                        }
+                    }
+                }
+            });
+
+            ui.add_space(4.0);
+            ui.separator();
+
+            // ── Default format ──────────────────────────────────
+            ui.horizontal(|ui| {
+                ui.label("デフォルト形式:");
+                for fmt in &self.config.all_formats() {
+                    let selected = self
+                        .config
+                        .default_format
+                        .eq_ignore_ascii_case(fmt);
+                    if ui.selectable_label(selected, fmt).clicked() {
+                        self.config.default_format = fmt.clone();
+                    }
+                }
+            });
+
+            // ── Default FPS ─────────────────────────────────────
+            ui.horizontal(|ui| {
+                ui.label("デフォルトFPS:");
+                let mut fps = self.config.default_fps as f32;
+                if ui
+                    .add(egui::Slider::new(&mut fps, 5.0..=30.0))
+                    .changed()
+                {
+                    self.config.default_fps = fps as u32;
+                }
+            });
+
+            // ── Default max size ────────────────────────────────
+            ui.horizontal(|ui| {
+                ui.label("デフォルト最大サイズ:");
+                let mut size = self.config.default_max_size_mb;
+                if ui
+                    .add(egui::Slider::new(&mut size, 1.0..=50.0).suffix(" MB"))
+                    .changed()
+                {
+                    self.config.default_max_size_mb = size;
+                }
+            });
+
+            ui.add_space(4.0);
+            ui.separator();
+
+            // ── Output directory ────────────────────────────────
+            ui.horizontal(|ui| {
+                ui.label("出力先:");
+                let mut dir_str = self.output_dir.to_string_lossy().to_string();
+                if ui.text_edit_singleline(&mut dir_str).changed() {
+                    self.output_dir = PathBuf::from(dir_str);
+                }
+            });
+
+            ui.horizontal(|ui| {
+                if ui.button("設定フォルダを開く").clicked() {
+                    if let Some(dir) = config::AppConfig::config_dir() {
+                        let _ = std::process::Command::new("explorer").arg(dir).spawn();
+                    }
+                }
+                if ui.button("出力フォルダを開く").clicked() {
+                    let _ = std::fs::create_dir_all(&self.output_dir);
+                    let _ = std::process::Command::new("explorer")
+                        .arg(&self.output_dir)
+                        .spawn();
+                }
+            });
+
+            ui.add_space(8.0);
+
+            // ── Save button ─────────────────────────────────────
+            if ui
+                .add_sized([280.0, 32.0], egui::Button::new("設定を保存"))
+                .clicked()
+            {
+                match self.config.save() {
+                    Ok(()) => self.status_message = "設定を保存しました".to_string(),
+                    Err(e) => {
+                        self.status_message = format!("設定の保存に失敗: {}", e)
+                    }
                 }
             }
+        });
+    }
+
+    fn ui_tab_status(&mut self, ui: &mut egui::Ui) {
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            // ── バージョン ───────────────────────────────────────
+            ui.heading("バージョン");
+            ui.label(format!("{} v{}", APP_TITLE, env!("CARGO_PKG_VERSION")));
+            ui.label(format!("画面: {}x{}", self.screen_size.0, self.screen_size.1));
+            ui.label(format!("設定: {}", config::AppConfig::config_path_display()));
+            ui.label(format!("出力: {}", self.output_dir.display()));
 
             ui.separator();
 
-            // ── Preview ─────────────────────────────────────────────
-            if let Some(capture) = &mut self.last_capture {
-                ui.label("プレビュー:");
-                let tex = capture.texture.get_or_insert_with(|| {
-                    let color_image = egui::ColorImage::from_rgba_unmultiplied(
-                        [capture.width as usize, capture.height as usize],
-                        &capture.rgba_data,
-                    );
-                    ctx.load_texture("capture_preview", color_image, egui::TextureOptions::LINEAR)
+            // ── ライセンス ───────────────────────────────────────
+            ui.heading("ライセンス");
+            ui.label("えぃにめ一閃流奥義「一閃 改」は MIT ライセンスで公開しています。");
+            ui.add_space(4.0);
+            egui::ScrollArea::vertical()
+                .id_salt("license_scroll")
+                .max_height(150.0)
+                .show(ui, |ui| {
+                    ui.monospace(MIT_LICENSE_TEXT);
                 });
 
-                let available = ui.available_size();
-                let aspect = capture.width as f32 / capture.height.max(1) as f32;
-                let preview_w = available.x.min(360.0);
-                let preview_h = preview_w / aspect;
-
-                ui.image(egui::load::SizedTexture::new(
-                    tex.id(),
-                    egui::vec2(preview_w, preview_h),
-                ));
-            }
-
-            // ── Status message ───────────────────────────────────────
-            if !self.status_message.is_empty() {
-                ui.separator();
-                ui.label(&self.status_message);
-            }
+            ui.add_space(4.0);
+            ui.label("本ソフトウェアは以下のソフトウェアをサブプロセスとして利用します:");
+            ui.label("  FFmpeg (GPL v3) - https://ffmpeg.org/");
+            ui.add_space(4.0);
+            ui.label("主要な依存ライブラリ:");
+            ui.label("  eframe/egui (MIT/Apache-2.0) - GUI");
+            ui.label("  windows-rs (MIT/Apache-2.0) - Win32 API");
+            ui.label("  image (MIT/Apache-2.0) - 画像処理");
 
             ui.separator();
 
-            // ── ステータス ──────────────────────────────────────────
-            ui.collapsing("ステータス", |ui| {
-                // バージョン
-                ui.collapsing("バージョン", |ui| {
-                    ui.label(format!("{} v{}", APP_TITLE, env!("CARGO_PKG_VERSION")));
-                    ui.label(format!("画面: {}x{}", self.screen_size.0, self.screen_size.1));
-                    ui.label(format!(
-                        "設定: {}",
-                        config::AppConfig::config_path_display()
-                    ));
-                    ui.label(format!("出力: {}", self.output_dir.display()));
-                    if ui.small_button("設定フォルダを開く").clicked() {
-                        if let Some(dir) = config::AppConfig::config_dir() {
-                            let _ = std::process::Command::new("explorer")
-                                .arg(dir)
-                                .spawn();
-                        }
-                    }
-                    if ui.small_button("出力フォルダを開く").clicked() {
-                        let _ = std::fs::create_dir_all(&self.output_dir);
-                        let _ = std::process::Command::new("explorer")
-                            .arg(&self.output_dir)
-                            .spawn();
-                    }
-                });
-
-                // ライセンス
-                ui.collapsing("ライセンス", |ui| {
-                    ui.label("えぃにめ一閃流奥義「一閃 改」は MIT ライセンスで公開しています。");
-                    ui.separator();
-                    egui::ScrollArea::vertical()
-                        .max_height(150.0)
-                        .show(ui, |ui| {
-                            ui.monospace(MIT_LICENSE_TEXT);
-                        });
-
-                    ui.separator();
-                    ui.label("本ソフトウェアは以下のソフトウェアをサブプロセスとして利用します:");
-                    ui.label("  FFmpeg (GPL v3) - https://ffmpeg.org/");
-                    ui.separator();
-                    ui.label("主要な依存ライブラリ:");
-                    ui.label("  eframe/egui (MIT/Apache-2.0) - GUI");
-                    ui.label("  windows-rs (MIT/Apache-2.0) - Win32 API");
-                    ui.label("  image (MIT/Apache-2.0) - 画像処理");
-                });
-
-                // ショートカット
-                ui.collapsing("ショートカット", |ui| {
-                    ui.label("構え画面:");
-                    ui.label("  ドラッグ - 範囲選択");
-                    ui.label("  Esc / 右クリック - キャンセル");
-                });
-            });
+            // ── ショートカット ───────────────────────────────────
+            ui.heading("ショートカット");
+            ui.label("構え画面:");
+            ui.label("  ドラッグ - 範囲選択");
+            ui.label("  Esc / 右クリック - キャンセル");
         });
     }
 }

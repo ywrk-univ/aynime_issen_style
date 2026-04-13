@@ -13,3 +13,8 @@ __pycache__
 *.egg-info
 /proposal/*
 /user_properties.json
+
+# Rust
+/rust-native/target/
+/rust-native/tools/
+/rust-native/output/

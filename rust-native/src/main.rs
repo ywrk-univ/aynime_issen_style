@@ -6,6 +6,7 @@ mod config;
 mod overlay;
 mod processing;
 
+use crate::capture::anime_title;
 use crate::capture::screen::ScreenCapturer;
 use crate::config::AppConfig;
 use crate::overlay::border::RegionBorder;
@@ -91,6 +92,9 @@ struct AynimeApp {
 
     config: AppConfig,
     current_tab: AppTab,
+
+    /// Detected anime title from window titles (auto-updated)
+    detected_anime: String,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -172,6 +176,7 @@ impl AynimeApp {
             capture_on_select: true,
             config,
             current_tab: AppTab::Main,
+            detected_anime: String::new(),
         }
     }
 
@@ -242,9 +247,20 @@ impl AynimeApp {
         self.capturer_reinit_after = Some(Instant::now() + std::time::Duration::from_millis(600));
     }
 
+    /// Scan window titles and update detected anime name.
+    fn refresh_anime_title(&mut self) {
+        if let Some(result) = anime_title::find_anime_title() {
+            if self.detected_anime != result.title {
+                log::info!("Anime detected: {}", result.title);
+                self.detected_anime = result.title;
+            }
+        }
+    }
+
     // ── Region selection (Win32 native) ─────────────────────────────
 
     fn do_region_selection(&mut self) {
+        self.refresh_anime_title();
         // The Win32 overlay uses BitBlt (captures desktop directly via GDI).
         // Drop the DXGI capturer first to avoid conflicts, then show overlay.
         self.capturer = None;
@@ -298,6 +314,7 @@ impl AynimeApp {
     // ── Capture ─────────────────────────────────────────────────────
 
     fn do_still_capture(&mut self) {
+        self.refresh_anime_title();
         if !self.ensure_capturer() {
             self.status_message = "準備中...".to_string();
             return;
@@ -343,12 +360,12 @@ impl AynimeApp {
         };
 
         let _ = std::fs::create_dir_all(&self.output_dir);
-        let timestamp = simple_timestamp();
+        let filestem = make_filename_stem(&self.detected_anime);
 
         let ext = export::format_extension(&self.export_format);
         let p = self
             .output_dir
-            .join(format!("capture_{}.{}", timestamp, ext));
+            .join(format!("{}.{}", filestem, ext));
         let path = match export::save_still(
             &capture.rgba_data,
             capture.width,
@@ -371,6 +388,7 @@ impl AynimeApp {
     // ── Recording ───────────────────────────────────────────────────
 
     fn start_recording(&mut self) {
+        self.refresh_anime_title();
         self.is_recording = true;
         self.recorded_frames.clear();
         self.record_start = Some(Instant::now());
@@ -403,14 +421,14 @@ impl AynimeApp {
         let status = self.encode_status.clone();
 
         let _ = std::fs::create_dir_all(&output_dir);
-        let timestamp = simple_timestamp();
+        let filestem = make_filename_stem(&self.detected_anime);
 
         *status.lock().unwrap() =
             EncodeStatus::Encoding(format!("収納中... ({}フレーム)", frame_count));
         self.status_message = format!("収納中... ({}フレーム)", frame_count);
 
         std::thread::spawn(move || {
-            let p = output_dir.join(format!("capture_{}.{}", timestamp, ext));
+            let p = output_dir.join(format!("{}.{}", filestem, ext));
             let result =
                 export::encode_video(&ffmpeg_path, &frames, fps, &p, Some(max_bytes), &format)
                     .map(|_| p);
@@ -552,6 +570,10 @@ impl AynimeApp {
             "範囲: {}x{} @ ({}, {})",
             self.region.width, self.region.height, self.region.x, self.region.y
         ));
+
+        if !self.detected_anime.is_empty() {
+            ui.label(format!("検出: {}", self.detected_anime));
+        }
 
         ui.separator();
 
@@ -885,4 +907,16 @@ fn simple_timestamp() -> String {
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default();
     format!("{}", d.as_secs())
+}
+
+/// Generate a filename stem like "anime_title_1776070000" or "capture_1776070000".
+fn make_filename_stem(anime_title: &str) -> String {
+    if anime_title.is_empty() {
+        format!("capture_{}", simple_timestamp())
+    } else {
+        let sanitized = anime_title::sanitize_for_filename(anime_title);
+        // Truncate to avoid overly long filenames
+        let truncated: String = sanitized.chars().take(80).collect();
+        format!("{}_{}", truncated, simple_timestamp())
+    }
 }

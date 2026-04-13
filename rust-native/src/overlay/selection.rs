@@ -51,12 +51,15 @@ unsafe fn show_selection_overlay_impl(capture_on_select: bool) -> Option<Selecti
     let screen_h = GetSystemMetrics(SM_CYSCREEN);
 
     // Capture desktop via BitBlt (HW accelerated, no format conversion)
+    // Hide cursor so it doesn't appear in the frozen screenshot
+    super::window::hide_cursor();
     let desktop_dc = GetDC(None);
     let mem_dc = CreateCompatibleDC(Some(desktop_dc));
     let mem_bmp = CreateCompatibleBitmap(desktop_dc, screen_w, screen_h);
     let old_bmp = SelectObject(mem_dc, mem_bmp.into());
     let _ = BitBlt(mem_dc, 0, 0, screen_w, screen_h, Some(desktop_dc), 0, 0, SRCCOPY);
     ReleaseDC(None, desktop_dc);
+    super::window::show_cursor();
 
     let mut data = SelectionData {
         mem_dc,

@@ -74,15 +74,21 @@ fn download_file(url: &str, dest: &Path) -> Result<()> {
         dest.extension().unwrap_or_default().to_string_lossy()
     ));
 
-    let output = std::process::Command::new("curl")
-        .args([
-            "-L",
-            "-f",
-            "--connect-timeout", "30",
-            "-o",
-            &part_path.to_string_lossy(),
-            url,
-        ])
+    let mut cmd = std::process::Command::new("curl");
+    cmd.args([
+        "-L",
+        "-f",
+        "--connect-timeout", "30",
+        "-o",
+        &part_path.to_string_lossy(),
+        url,
+    ]);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    let output = cmd
         .output()
         .context("Failed to run curl. Is curl available?")?;
 

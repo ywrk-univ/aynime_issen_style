@@ -3,12 +3,14 @@
 
 mod capture;
 mod config;
+mod hotkey;
 mod overlay;
 mod processing;
 
 use crate::capture::anime_title;
 use crate::capture::screen::ScreenCapturer;
 use crate::config::AppConfig;
+use crate::hotkey::{HotkeyAction, HotkeyReceiver};
 use crate::overlay::border::RegionBorder;
 use crate::overlay::selection;
 use crate::overlay::window::apply_capture_exclusion_to_egui_window;
@@ -95,6 +97,9 @@ struct AynimeApp {
 
     /// Detected anime title from window titles (auto-updated)
     detected_anime: String,
+
+    /// Global hotkey event queue
+    hotkey_rx: HotkeyReceiver,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -146,6 +151,8 @@ impl AynimeApp {
             }
         };
 
+        let hotkey_rx = hotkey::start_hotkey_listener();
+
         Self {
             capture_error: if capturer.is_none() {
                 Some(
@@ -177,6 +184,7 @@ impl AynimeApp {
             config,
             current_tab: AppTab::Main,
             detected_anime: String::new(),
+            hotkey_rx,
         }
     }
 
@@ -324,9 +332,11 @@ impl AynimeApp {
             return;
         };
 
+        overlay::window::hide_cursor();
         for _ in 0..3 {
             match capturer.capture_frame() {
                 Ok(Some(frame)) => {
+                    overlay::window::show_cursor();
                     let (rgba, w, h) = self.region.extract_from_frame(&frame);
                     // Copy to clipboard
                     if let Err(e) = clipboard::copy_rgba_to_clipboard(&rgba, w, h) {
@@ -343,12 +353,14 @@ impl AynimeApp {
                 }
                 Ok(None) => continue,
                 Err(_) => {
+                    overlay::window::show_cursor();
                     self.schedule_capturer_reinit();
                     self.status_message = "準備中...".to_string();
                     return;
                 }
             }
         }
+        overlay::window::show_cursor();
         self.status_message =
             "キャプチャに失敗。\nキャプチャ対象のディスプレイの選択を忘れている？".to_string();
     }
@@ -417,6 +429,7 @@ impl AynimeApp {
         let fps = self.record_fps;
         let max_bytes = (self.max_file_size_mb * 1024.0 * 1024.0) as u64;
         let format = self.export_format.clone();
+        let gif_mode = self.config.gif_quality_mode;
         let ext = export::format_extension(&format).to_string();
         let status = self.encode_status.clone();
 
@@ -430,7 +443,7 @@ impl AynimeApp {
         std::thread::spawn(move || {
             let p = output_dir.join(format!("{}.{}", filestem, ext));
             let result =
-                export::encode_video(&ffmpeg_path, &frames, fps, &p, Some(max_bytes), &format)
+                export::encode_video(&ffmpeg_path, &frames, fps, &p, Some(max_bytes), &format, gif_mode)
                     .map(|_| p);
 
             let mut s = status.lock().unwrap();
@@ -471,7 +484,11 @@ impl AynimeApp {
             }
         }
 
-        if let Ok(Some(frame)) = capturer.capture_frame() {
+        overlay::window::hide_cursor();
+        let frame_result = capturer.capture_frame();
+        overlay::window::show_cursor();
+
+        if let Ok(Some(frame)) = frame_result {
             let (rgba, w, h) = self.region.extract_from_frame(&frame);
             if w >= 2 && h >= 2 {
                 self.recorded_frames.push((rgba, w, h));
@@ -498,6 +515,32 @@ impl eframe::App for AynimeApp {
             self.ensure_capturer();
             if self.capturer.is_none() {
                 ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            }
+        }
+
+        // Poll global hotkey events
+        // (repaint periodically so hotkeys are picked up even when the window is inactive)
+        ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        {
+            let actions: Vec<HotkeyAction> = {
+                let mut q = self.hotkey_rx.lock().unwrap();
+                q.drain(..).collect()
+            };
+            for action in actions {
+                match action {
+                    HotkeyAction::StillCapture => {
+                        if !self.is_recording {
+                            self.do_still_capture();
+                        }
+                    }
+                    HotkeyAction::RecordToggle => {
+                        if self.is_recording {
+                            self.stop_recording();
+                        } else if self.is_video_format() {
+                            self.start_recording();
+                        }
+                    }
+                }
             }
         }
 
@@ -781,6 +824,17 @@ impl AynimeApp {
                 }
             });
 
+            // ── GIF Quality Mode ───────────────────────────────
+            ui.horizontal(|ui| {
+                ui.label("GIFモード:");
+                for mode in [config::GifQualityMode::Quality, config::GifQualityMode::Fast] {
+                    let selected = self.config.gif_quality_mode == mode;
+                    if ui.selectable_label(selected, mode.label()).clicked() {
+                        self.config.gif_quality_mode = mode;
+                    }
+                }
+            });
+
             // ── Default max size ────────────────────────────────
             ui.horizontal(|ui| {
                 ui.label("デフォルト最大サイズ:");
@@ -880,6 +934,8 @@ impl AynimeApp {
             ui.label("  eframe/egui (MIT/Apache-2.0) - GUI");
             ui.label("  windows-rs (MIT/Apache-2.0) - Win32 API");
             ui.label("  image (MIT/Apache-2.0) - 画像処理");
+            ui.label("  gifski (AGPL-3.0) - 高品質GIFエンコード");
+            ui.label("  imagequant (GPL-3.0) - 色量子化 (gifski依存)");
         });
     }
 }

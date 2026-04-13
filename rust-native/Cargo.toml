@@ -37,12 +37,20 @@ log = "0.4"
 # Error handling
 anyhow = "1"
 
+# Regex (for parsing ffmpeg encoder list)
+regex = "1"
+
 # Serialization (for settings)
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # Zip extraction (for tool download)
 zip = "2"
+
+# GIF encoding (high-quality, multi-threaded)
+gifski = "1"
+imgref = "1"
+rgb = "0.8"
 
 [profile.release]
 opt-level = 3

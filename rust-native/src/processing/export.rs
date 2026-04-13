@@ -35,6 +35,78 @@ pub fn save_as_webp(
     Ok(())
 }
 
+/// Save RGBA pixel data as a JPEG file.
+pub fn save_as_jpeg(
+    data: &[u8],
+    width: u32,
+    height: u32,
+    path: &Path,
+    quality: u8,
+) -> Result<()> {
+    let img: RgbaImage = ImageBuffer::from_raw(width, height, data.to_vec())
+        .context("Failed to create image buffer from raw data")?;
+    let rgb = image::DynamicImage::ImageRgba8(img).to_rgb8();
+    let mut file = std::fs::File::create(path)
+        .with_context(|| format!("Failed to create {}", path.display()))?;
+    let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut file, quality);
+    image::ImageEncoder::write_image(
+        encoder,
+        &rgb,
+        width,
+        height,
+        image::ColorType::Rgb8.into(),
+    )
+    .with_context(|| format!("Failed to encode JPEG to {}", path.display()))?;
+    log::info!("Saved JPEG: {} ({}x{}, q={})", path.display(), width, height, quality);
+    Ok(())
+}
+
+/// Save RGBA pixel data as a BMP file.
+pub fn save_as_bmp(
+    data: &[u8],
+    width: u32,
+    height: u32,
+    path: &Path,
+) -> Result<()> {
+    let img: RgbaImage = ImageBuffer::from_raw(width, height, data.to_vec())
+        .context("Failed to create image buffer from raw data")?;
+    img.save(path)
+        .with_context(|| format!("Failed to save BMP to {}", path.display()))?;
+    log::info!("Saved BMP: {} ({}x{})", path.display(), width, height);
+    Ok(())
+}
+
+/// Save RGBA pixel data in the given format (by extension).
+pub fn save_still(
+    data: &[u8],
+    width: u32,
+    height: u32,
+    path: &Path,
+    format: &str,
+) -> Result<()> {
+    match format.to_uppercase().as_str() {
+        "PNG" => save_as_png(data, width, height, path),
+        "WEBP" => save_as_webp(data, width, height, path, 85),
+        "JPEG" | "JPG" => save_as_jpeg(data, width, height, path, 90),
+        "BMP" => save_as_bmp(data, width, height, path),
+        _ => anyhow::bail!("Unsupported still format: {}", format),
+    }
+}
+
+/// Get file extension for a format name.
+pub fn format_extension(format: &str) -> &str {
+    match format.to_uppercase().as_str() {
+        "PNG" => "png",
+        "WEBP" => "webp",
+        "JPEG" | "JPG" => "jpg",
+        "BMP" => "bmp",
+        "GIF" => "gif",
+        "MP4" => "mp4",
+        "WEBM" => "webm",
+        _ => "bin",
+    }
+}
+
 /// Encode a series of RGBA frames into an MP4 using FFmpeg.
 /// `ffmpeg_path` - path to the ffmpeg binary
 /// `frames` - list of (rgba_data, width, height) tuples
@@ -289,4 +361,115 @@ pub fn encode_gif(
     let _ = std::fs::remove_file(&palette_path);
 
     Ok(())
+}
+
+/// Encode frames as WebM (VP9) using FFmpeg.
+pub fn encode_webm(
+    ffmpeg_path: &Path,
+    frames: &[(Vec<u8>, u32, u32)],
+    fps: u32,
+    output_path: &Path,
+    max_size_bytes: Option<u64>,
+) -> Result<()> {
+    if frames.is_empty() {
+        anyhow::bail!("No frames to encode");
+    }
+
+    let (_, width, height) = &frames[0];
+    let width = *width;
+    let height = *height;
+
+    if width < 2 || height < 2 {
+        anyhow::bail!(
+            "Frame dimensions too small for encoding: {}x{} (minimum 2x2)",
+            width,
+            height
+        );
+    }
+
+    log::info!(
+        "Encoding WebM: {}x{}, {} frames @ {} fps",
+        width,
+        height,
+        frames.len(),
+        fps
+    );
+
+    let temp_dir = output_path.parent().unwrap_or(Path::new("."));
+    let raw_path = temp_dir.join("_temp_frames_webm.raw");
+
+    let mut raw_data = Vec::new();
+    for (data, _, _) in frames {
+        raw_data.extend_from_slice(data);
+    }
+    std::fs::write(&raw_path, &raw_data)
+        .context("Failed to write temp raw frames")?;
+
+    let vf = "scale=trunc(iw/2)*2:trunc(ih/2)*2";
+
+    // First pass at CRF 30
+    let mut crf = 30u32;
+    loop {
+        let _ = std::fs::remove_file(output_path);
+        let result = Command::new(ffmpeg_path)
+            .args([
+                "-y",
+                "-f", "rawvideo",
+                "-pix_fmt", "rgba",
+                "-s", &format!("{}x{}", width, height),
+                "-r", &fps.to_string(),
+                "-i", &raw_path.to_string_lossy(),
+                "-vf", vf,
+                "-c:v", "libvpx-vp9",
+                "-pix_fmt", "yuv420p",
+                "-crf", &crf.to_string(),
+                "-b:v", "0",
+                &output_path.to_string_lossy(),
+            ])
+            .output()
+            .context("Failed to run ffmpeg for WebM")?;
+
+        if !result.status.success() {
+            let _ = std::fs::remove_file(&raw_path);
+            let stderr = String::from_utf8_lossy(&result.stderr);
+            anyhow::bail!("FFmpeg WebM encoding failed: {}", stderr);
+        }
+
+        if let Some(max_size) = max_size_bytes {
+            let file_size = std::fs::metadata(output_path)
+                .map(|m| m.len())
+                .unwrap_or(0);
+            if file_size > max_size && crf < 55 {
+                crf += 5;
+                log::info!(
+                    "WebM size {} exceeds limit {}, retrying at CRF {}",
+                    file_size,
+                    max_size,
+                    crf
+                );
+                continue;
+            }
+        }
+        break;
+    }
+
+    let _ = std::fs::remove_file(&raw_path);
+    Ok(())
+}
+
+/// Encode video in the given format.
+pub fn encode_video(
+    ffmpeg_path: &Path,
+    frames: &[(Vec<u8>, u32, u32)],
+    fps: u32,
+    output_path: &Path,
+    max_size_bytes: Option<u64>,
+    format: &str,
+) -> Result<()> {
+    match format.to_uppercase().as_str() {
+        "MP4" => encode_mp4(ffmpeg_path, frames, fps, output_path, max_size_bytes),
+        "GIF" => encode_gif(ffmpeg_path, frames, fps, output_path, max_size_bytes),
+        "WEBM" => encode_webm(ffmpeg_path, frames, fps, output_path, max_size_bytes),
+        _ => anyhow::bail!("Unsupported video format: {}", format),
+    }
 }

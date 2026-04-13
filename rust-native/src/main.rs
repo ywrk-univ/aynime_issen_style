@@ -2,10 +2,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod capture;
+mod config;
 mod overlay;
 mod processing;
 
 use crate::capture::screen::ScreenCapturer;
+use crate::config::AppConfig;
 use crate::overlay::border::RegionBorder;
 use crate::overlay::selection;
 use crate::overlay::window::apply_capture_exclusion_to_egui_window;
@@ -75,7 +77,8 @@ struct AynimeApp {
     output_dir: PathBuf,
     ffmpeg_path: PathBuf,
     max_file_size_mb: f32,
-    export_format: ExportFormat,
+    /// Current format name (e.g. "PNG", "GIF", "MP4")
+    export_format: String,
 
     encode_status: Arc<Mutex<EncodeStatus>>,
 
@@ -84,16 +87,9 @@ struct AynimeApp {
     status_message: String,
 
     region_border: RegionBorder,
-    /// When true, still capture is done at region selection time
     capture_on_select: bool,
-}
 
-#[derive(Clone, Copy, PartialEq)]
-enum ExportFormat {
-    Png,
-    WebP,
-    Mp4,
-    Gif,
+    config: AppConfig,
 }
 
 struct CapturedImage {
@@ -125,6 +121,8 @@ impl AynimeApp {
             .map(|c| c.dimensions())
             .unwrap_or((1920, 1080));
 
+        let config = AppConfig::load();
+
         let ffmpeg_path = match ensure_tools::ensure_ffmpeg() {
             Ok(p) => {
                 log::info!("ffmpeg ready: {}", p.display());
@@ -152,18 +150,19 @@ impl AynimeApp {
             is_recording: false,
             recorded_frames: Vec::new(),
             record_start: None,
-            record_fps: 15,
+            record_fps: config.default_fps,
             last_frame_time: None,
             output_dir: ensure_tools::default_output_dir(),
             ffmpeg_path,
-            max_file_size_mb: 8.0,
-            export_format: ExportFormat::Png,
+            max_file_size_mb: config.default_max_size_mb,
+            export_format: config.default_format.clone(),
             encode_status: Arc::new(Mutex::new(EncodeStatus::Idle)),
             capture_exclusion_applied: false,
             last_capture: None,
             status_message: String::new(),
             region_border: RegionBorder::new(),
             capture_on_select: true,
+            config,
         }
     }
 
@@ -226,6 +225,10 @@ impl AynimeApp {
         }
     }
 
+    fn is_video_format(&self) -> bool {
+        self.config.is_video_format(&self.export_format)
+    }
+
     fn schedule_capturer_reinit(&mut self) {
         self.capturer = None;
         self.capturer_reinit_after = Some(Instant::now() + std::time::Duration::from_millis(600));
@@ -238,8 +241,7 @@ impl AynimeApp {
         // Drop the DXGI capturer first to avoid conflicts, then show overlay.
         self.capturer = None;
 
-        let do_capture = self.capture_on_select
-            && matches!(self.export_format, ExportFormat::Png | ExportFormat::WebP);
+        let do_capture = self.capture_on_select && !self.is_video_format();
 
         log::info!(
             "Opening native selection overlay... (capture={})",
@@ -335,21 +337,18 @@ impl AynimeApp {
         let _ = std::fs::create_dir_all(&self.output_dir);
         let timestamp = simple_timestamp();
 
-        let path = match self.export_format {
-            ExportFormat::Png => {
-                let p = self.output_dir.join(format!("capture_{}.png", timestamp));
-                export::save_as_png(&capture.rgba_data, capture.width, capture.height, &p)
-                    .map(|_| p)
-                    .ok()
-            }
-            ExportFormat::WebP => {
-                let p = self.output_dir.join(format!("capture_{}.webp", timestamp));
-                export::save_as_webp(&capture.rgba_data, capture.width, capture.height, &p, 85)
-                    .map(|_| p)
-                    .ok()
-            }
-            _ => {
-                self.status_message = "静止画はPNG/WebPで収納してください".to_string();
+        let ext = export::format_extension(&self.export_format);
+        let p = self.output_dir.join(format!("capture_{}.{}", timestamp, ext));
+        let path = match export::save_still(
+            &capture.rgba_data,
+            capture.width,
+            capture.height,
+            &p,
+            &self.export_format,
+        ) {
+            Ok(()) => Some(p),
+            Err(e) => {
+                self.status_message = format!("収納に失敗: {}", e);
                 None
             }
         };
@@ -388,7 +387,8 @@ impl AynimeApp {
         let output_dir = self.output_dir.clone();
         let fps = self.record_fps;
         let max_bytes = (self.max_file_size_mb * 1024.0 * 1024.0) as u64;
-        let format = self.export_format;
+        let format = self.export_format.clone();
+        let ext = export::format_extension(&format).to_string();
         let status = self.encode_status.clone();
 
         let _ = std::fs::create_dir_all(&output_dir);
@@ -399,17 +399,11 @@ impl AynimeApp {
         self.status_message = format!("収納中... ({}フレーム)", frame_count);
 
         std::thread::spawn(move || {
-            let result = match format {
-                ExportFormat::Mp4 => {
-                    let p = output_dir.join(format!("capture_{}.mp4", timestamp));
-                    export::encode_mp4(&ffmpeg_path, &frames, fps, &p, Some(max_bytes)).map(|_| p)
-                }
-                ExportFormat::Gif => {
-                    let p = output_dir.join(format!("capture_{}.gif", timestamp));
-                    export::encode_gif(&ffmpeg_path, &frames, fps, &p, Some(max_bytes)).map(|_| p)
-                }
-                _ => Err(anyhow::anyhow!("Unsupported format for video")),
-            };
+            let p = output_dir.join(format!("capture_{}.{}", timestamp, ext));
+            let result = export::encode_video(
+                &ffmpeg_path, &frames, fps, &p, Some(max_bytes), &format,
+            )
+            .map(|_| p);
 
             let mut s = status.lock().unwrap();
             match result {
@@ -535,15 +529,18 @@ impl eframe::App for AynimeApp {
 
             // ── Export settings ─────────────────────────────────────
             ui.collapsing("出力設定", |ui| {
-                ui.horizontal(|ui| {
+                // Format selection from config
+                ui.horizontal_wrapped(|ui| {
                     ui.label("形式:");
-                    ui.selectable_value(&mut self.export_format, ExportFormat::Png, "PNG");
-                    ui.selectable_value(&mut self.export_format, ExportFormat::WebP, "WebP");
-                    ui.selectable_value(&mut self.export_format, ExportFormat::Mp4, "MP4");
-                    ui.selectable_value(&mut self.export_format, ExportFormat::Gif, "GIF");
+                    for fmt in &self.config.all_formats() {
+                        let selected = self.export_format.eq_ignore_ascii_case(fmt);
+                        if ui.selectable_label(selected, fmt).clicked() {
+                            self.export_format = fmt.clone();
+                        }
+                    }
                 });
 
-                if matches!(self.export_format, ExportFormat::Mp4 | ExportFormat::Gif) {
+                if self.is_video_format() {
                     ui.horizontal(|ui| {
                         ui.label("FPS:");
                         let mut fps = self.record_fps as f32;
@@ -553,9 +550,13 @@ impl eframe::App for AynimeApp {
                     });
                     ui.horizontal(|ui| {
                         ui.label("最大サイズ:");
-                        ui.add(
-                            egui::Slider::new(&mut self.max_file_size_mb, 1.0..=50.0).suffix(" MB"),
-                        );
+                        for &preset in &self.config.max_size_presets_mb {
+                            let label = format!("{:.0}MB", preset);
+                            let selected = (self.max_file_size_mb - preset).abs() < 0.1;
+                            if ui.selectable_label(selected, &label).clicked() {
+                                self.max_file_size_mb = preset;
+                            }
+                        }
                     });
                 }
 
@@ -575,7 +576,7 @@ impl eframe::App for AynimeApp {
                 *self.encode_status.lock().unwrap(),
                 EncodeStatus::Encoding(_)
             );
-            let is_still = matches!(self.export_format, ExportFormat::Png | ExportFormat::WebP);
+            let is_still = !self.is_video_format();
 
             if is_still {
                 ui.horizontal(|ui| {

@@ -7,7 +7,9 @@ use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 /// 十字カーソルのサイズ (片腕の長さ)
-const ARM_LEN: i32 = 10;
+const ARM_LEN: i32 = 15;
+/// 線の太さ
+const PEN_WIDTH: i32 = 2;
 /// ウィンドウ全体サイズ
 const WIN_SIZE: i32 = ARM_LEN * 2 + 1;
 /// 十字線の色 (BGR: 赤)
@@ -47,12 +49,9 @@ impl CursorProxy {
             };
             let _ = RegisterClassExW(&wc);
 
+            // WS_EX_TRANSPARENT は除外 — レイヤードウィンドウの描画を妨げるため
             let hwnd = CreateWindowExW(
-                WS_EX_TOPMOST
-                    | WS_EX_TOOLWINDOW
-                    | WS_EX_TRANSPARENT
-                    | WS_EX_NOACTIVATE
-                    | WS_EX_LAYERED,
+                WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED,
                 class_name,
                 w!(""),
                 WS_POPUP,
@@ -90,10 +89,9 @@ impl CursorProxy {
         if self.visible {
             return;
         }
-        unsafe {
-            let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
-        }
         self.visible = true;
+        self.update_position();
+        log::info!("Cursor proxy shown");
     }
 
     /// 代理カーソルを非表示にする。
@@ -105,6 +103,7 @@ impl CursorProxy {
             let _ = ShowWindow(self.hwnd, SW_HIDE);
         }
         self.visible = false;
+        log::info!("Cursor proxy hidden");
     }
 
     /// マウス位置に追従させる。録画ループ内で毎フレーム呼ぶ。
@@ -120,10 +119,11 @@ impl CursorProxy {
                     Some(HWND_TOPMOST),
                     pt.x - ARM_LEN,
                     pt.y - ARM_LEN,
-                    WIN_SIZE,
-                    WIN_SIZE,
+                    0,
+                    0,
                     SWP_NOACTIVATE | SWP_NOSIZE | SWP_SHOWWINDOW,
                 );
+                let _ = InvalidateRect(Some(self.hwnd), None, true);
             }
         }
     }
@@ -144,11 +144,16 @@ unsafe extern "system" fn cursor_wnd_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     unsafe {
+        // クリックを下のウィンドウに透過させる
+        if msg == WM_NCHITTEST {
+            return LRESULT(-1); // HTTRANSPARENT
+        }
+
         if msg == WM_PAINT {
             let mut ps = PAINTSTRUCT::default();
             let hdc = BeginPaint(hwnd, &mut ps);
 
-            let pen = CreatePen(PS_SOLID, 1, COLORREF(CROSS_COLOR));
+            let pen = CreatePen(PS_SOLID, PEN_WIDTH, COLORREF(CROSS_COLOR));
             let old_pen = SelectObject(hdc, pen.into());
 
             let c = ARM_LEN; // 中心座標

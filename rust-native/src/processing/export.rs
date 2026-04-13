@@ -7,15 +7,27 @@ use std::sync::OnceLock;
 
 use crate::config::GifQualityMode;
 
+/// Windows: CREATE_NO_WINDOW (0x08000000) を付与してコンソールウィンドウを非表示にする
+#[cfg(target_os = "windows")]
+fn hide_console_window(cmd: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    cmd.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(target_os = "windows"))]
+fn hide_console_window(_cmd: &mut Command) {}
+
 /// ffmpeg で利用可能な H.264 エンコーダのキャッシュ
 static H264_ENCODERS: OnceLock<HashSet<String>> = OnceLock::new();
 
 /// ffmpeg に問い合わせて利用可能なビデオエンコーダ一覧を取得する
 fn enumerate_h264_encoders(ffmpeg_path: &Path) -> &'static HashSet<String> {
     H264_ENCODERS.get_or_init(|| {
-        let output = Command::new(ffmpeg_path)
-            .args(["-hide_banner", "-encoders"])
-            .output();
+        let mut cmd = Command::new(ffmpeg_path);
+        cmd.args(["-hide_banner", "-encoders"]);
+        hide_console_window(&mut cmd);
+        let output = cmd.output();
         let mut encoders = HashSet::new();
         if let Ok(output) = output {
             let text = String::from_utf8_lossy(&output.stdout);
@@ -43,11 +55,13 @@ fn cpu_throttled_command(ffmpeg_path: &Path) -> Command {
         / 2;
     let threads = threads.max(1);
     cmd.args(["-threads", &threads.to_string()]);
-    // Windows: BELOW_NORMAL_PRIORITY_CLASS (0x00004000)
+    // Windows: BELOW_NORMAL_PRIORITY_CLASS | CREATE_NO_WINDOW
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x00004000);
+        const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x00004000;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(BELOW_NORMAL_PRIORITY_CLASS | CREATE_NO_WINDOW);
     }
     cmd
 }
@@ -290,6 +304,7 @@ pub fn encode_mp4(
     for candidate in &candidates {
         let _ = std::fs::remove_file(output_path);
         let mut cmd = Command::new(ffmpeg_path);
+        hide_console_window(&mut cmd);
         cmd.args([
             "-y",
             "-hide_banner",

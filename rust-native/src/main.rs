@@ -3,12 +3,14 @@
 
 mod capture;
 mod config;
+mod hotkey;
 mod overlay;
 mod processing;
 
 use crate::capture::anime_title;
 use crate::capture::screen::ScreenCapturer;
 use crate::config::AppConfig;
+use crate::hotkey::{HotkeyAction, HotkeyReceiver};
 use crate::overlay::border::RegionBorder;
 use crate::overlay::selection;
 use crate::overlay::window::apply_capture_exclusion_to_egui_window;
@@ -95,6 +97,9 @@ struct AynimeApp {
 
     /// Detected anime title from window titles (auto-updated)
     detected_anime: String,
+
+    /// Global hotkey event queue
+    hotkey_rx: HotkeyReceiver,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -146,6 +151,8 @@ impl AynimeApp {
             }
         };
 
+        let hotkey_rx = hotkey::start_hotkey_listener();
+
         Self {
             capture_error: if capturer.is_none() {
                 Some(
@@ -177,6 +184,7 @@ impl AynimeApp {
             config,
             current_tab: AppTab::Main,
             detected_anime: String::new(),
+            hotkey_rx,
         }
     }
 
@@ -324,9 +332,11 @@ impl AynimeApp {
             return;
         };
 
+        overlay::window::hide_cursor();
         for _ in 0..3 {
             match capturer.capture_frame() {
                 Ok(Some(frame)) => {
+                    overlay::window::show_cursor();
                     let (rgba, w, h) = self.region.extract_from_frame(&frame);
                     // Copy to clipboard
                     if let Err(e) = clipboard::copy_rgba_to_clipboard(&rgba, w, h) {
@@ -343,12 +353,14 @@ impl AynimeApp {
                 }
                 Ok(None) => continue,
                 Err(_) => {
+                    overlay::window::show_cursor();
                     self.schedule_capturer_reinit();
                     self.status_message = "準備中...".to_string();
                     return;
                 }
             }
         }
+        overlay::window::show_cursor();
         self.status_message =
             "キャプチャに失敗。\nキャプチャ対象のディスプレイの選択を忘れている？".to_string();
     }
@@ -472,7 +484,11 @@ impl AynimeApp {
             }
         }
 
-        if let Ok(Some(frame)) = capturer.capture_frame() {
+        overlay::window::hide_cursor();
+        let frame_result = capturer.capture_frame();
+        overlay::window::show_cursor();
+
+        if let Ok(Some(frame)) = frame_result {
             let (rgba, w, h) = self.region.extract_from_frame(&frame);
             if w >= 2 && h >= 2 {
                 self.recorded_frames.push((rgba, w, h));
@@ -499,6 +515,32 @@ impl eframe::App for AynimeApp {
             self.ensure_capturer();
             if self.capturer.is_none() {
                 ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            }
+        }
+
+        // Poll global hotkey events
+        // (repaint periodically so hotkeys are picked up even when the window is inactive)
+        ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        {
+            let actions: Vec<HotkeyAction> = {
+                let mut q = self.hotkey_rx.lock().unwrap();
+                q.drain(..).collect()
+            };
+            for action in actions {
+                match action {
+                    HotkeyAction::StillCapture => {
+                        if !self.is_recording {
+                            self.do_still_capture();
+                        }
+                    }
+                    HotkeyAction::RecordToggle => {
+                        if self.is_recording {
+                            self.stop_recording();
+                        } else if self.is_video_format() {
+                            self.start_recording();
+                        }
+                    }
+                }
             }
         }
 

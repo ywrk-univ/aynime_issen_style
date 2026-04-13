@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::{
-    FindWindowW, SetWindowDisplayAffinity, WINDOW_DISPLAY_AFFINITY,
+    FindWindowW, LoadCursorW, SetCursor, SetWindowDisplayAffinity, IDC_ARROW,
+    WINDOW_DISPLAY_AFFINITY,
 };
 
 /// WDA_EXCLUDEFROMCAPTURE = 0x00000011 (Windows 10 2004+)
@@ -16,6 +17,22 @@ pub fn set_exclude_from_capture(hwnd: HWND) -> Result<()> {
     }
     log::info!("WDA_EXCLUDEFROMCAPTURE set on HWND {:?}", hwnd.0);
     Ok(())
+}
+
+/// Hide the system cursor. Call `show_cursor()` to restore.
+pub fn hide_cursor() {
+    unsafe {
+        let _ = SetCursor(None);
+    }
+}
+
+/// Restore the system cursor to the default arrow.
+pub fn show_cursor() {
+    unsafe {
+        if let Ok(cursor) = LoadCursorW(None, IDC_ARROW) {
+            let _ = SetCursor(Some(cursor));
+        }
+    }
 }
 
 /// Find our eframe window by title and apply the capture exclusion.

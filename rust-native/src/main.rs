@@ -93,6 +93,7 @@ struct AynimeApp {
     status_message: String,
 
     region_border: RegionBorder,
+    cursor_proxy: overlay::cursor_proxy::CursorProxy,
     capture_on_select: bool,
 
     config: AppConfig,
@@ -194,6 +195,7 @@ impl AynimeApp {
             last_capture: None,
             status_message: String::new(),
             region_border: RegionBorder::new(),
+            cursor_proxy: overlay::cursor_proxy::CursorProxy::new(),
             capture_on_select: true,
             config,
             current_tab: AppTab::Main,
@@ -424,7 +426,10 @@ impl AynimeApp {
         self.recorded_frames.clear();
         self.record_start = Some(Instant::now());
         self.last_frame_time = None;
-        overlay::window::hide_cursor();
+        if self.config.hide_cursor_on_record {
+            overlay::window::hide_cursor();
+            self.cursor_proxy.show();
+        }
         log::info!(
             "Recording started. Region: {:?}, Screen: {:?}",
             self.region,
@@ -436,7 +441,10 @@ impl AynimeApp {
 
     fn stop_recording(&mut self) {
         self.is_recording = false;
-        overlay::window::show_cursor();
+        if self.config.hide_cursor_on_record {
+            self.cursor_proxy.hide();
+            overlay::window::show_cursor();
+        }
         let frame_count = self.recorded_frames.len();
 
         if frame_count == 0 {
@@ -619,6 +627,7 @@ impl eframe::App for AynimeApp {
 
         // Recording loop
         if self.is_recording {
+            self.cursor_proxy.update_position();
             self.record_frame();
             ctx.request_repaint();
         }
@@ -995,6 +1004,12 @@ impl AynimeApp {
                     self.config.default_max_size_mb = size;
                 }
             });
+
+            // ── Hide cursor on record ──────────────────────────
+            ui.checkbox(
+                &mut self.config.hide_cursor_on_record,
+                "録画中にカーソルを隠す (カスタムカーソル対策)",
+            );
 
             ui.add_space(4.0);
             ui.separator();

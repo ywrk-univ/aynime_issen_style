@@ -42,6 +42,8 @@ pub struct AppConfig {
     pub default_format: String,
     /// GIF エンコードモード (Quality / Fast)
     pub gif_quality_mode: GifQualityMode,
+    /// 録画中にシステムカーソルを非表示にする (カスタムカーソル対策)
+    pub hide_cursor_on_record: bool,
 }
 
 impl Default for AppConfig {
@@ -63,6 +65,7 @@ impl Default for AppConfig {
             default_fps: 15,
             default_format: "PNG".into(),
             gif_quality_mode: GifQualityMode::Quality,
+            hide_cursor_on_record: false,
         }
     }
 }

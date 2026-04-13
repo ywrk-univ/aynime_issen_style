@@ -6,6 +6,7 @@ mod config;
 mod overlay;
 mod processing;
 
+use crate::capture::anime_title;
 use crate::capture::screen::ScreenCapturer;
 use crate::config::AppConfig;
 use crate::overlay::border::RegionBorder;
@@ -91,6 +92,9 @@ struct AynimeApp {
 
     config: AppConfig,
     current_tab: AppTab,
+
+    /// Detected anime title from window titles (auto-updated)
+    detected_anime: String,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -172,6 +176,7 @@ impl AynimeApp {
             capture_on_select: true,
             config,
             current_tab: AppTab::Main,
+            detected_anime: String::new(),
         }
     }
 
@@ -242,9 +247,20 @@ impl AynimeApp {
         self.capturer_reinit_after = Some(Instant::now() + std::time::Duration::from_millis(600));
     }
 
+    /// Scan window titles and update detected anime name.
+    fn refresh_anime_title(&mut self) {
+        if let Some(result) = anime_title::find_anime_title() {
+            if self.detected_anime != result.title {
+                log::info!("Anime detected: {}", result.title);
+                self.detected_anime = result.title;
+            }
+        }
+    }
+
     // ── Region selection (Win32 native) ─────────────────────────────
 
     fn do_region_selection(&mut self) {
+        self.refresh_anime_title();
         // The Win32 overlay uses BitBlt (captures desktop directly via GDI).
         // Drop the DXGI capturer first to avoid conflicts, then show overlay.
         self.capturer = None;
@@ -298,6 +314,7 @@ impl AynimeApp {
     // ── Capture ─────────────────────────────────────────────────────
 
     fn do_still_capture(&mut self) {
+        self.refresh_anime_title();
         if !self.ensure_capturer() {
             self.status_message = "準備中...".to_string();
             return;
@@ -343,12 +360,12 @@ impl AynimeApp {
         };
 
         let _ = std::fs::create_dir_all(&self.output_dir);
-        let timestamp = simple_timestamp();
+        let filestem = make_filename_stem(&self.detected_anime);
 
         let ext = export::format_extension(&self.export_format);
         let p = self
             .output_dir
-            .join(format!("capture_{}.{}", timestamp, ext));
+            .join(format!("{}.{}", filestem, ext));
         let path = match export::save_still(
             &capture.rgba_data,
             capture.width,
@@ -371,6 +388,7 @@ impl AynimeApp {
     // ── Recording ───────────────────────────────────────────────────
 
     fn start_recording(&mut self) {
+        self.refresh_anime_title();
         self.is_recording = true;
         self.recorded_frames.clear();
         self.record_start = Some(Instant::now());
@@ -403,14 +421,14 @@ impl AynimeApp {
         let status = self.encode_status.clone();
 
         let _ = std::fs::create_dir_all(&output_dir);
-        let timestamp = simple_timestamp();
+        let filestem = make_filename_stem(&self.detected_anime);
 
         *status.lock().unwrap() =
             EncodeStatus::Encoding(format!("収納中... ({}フレーム)", frame_count));
         self.status_message = format!("収納中... ({}フレーム)", frame_count);
 
         std::thread::spawn(move || {
-            let p = output_dir.join(format!("capture_{}.{}", timestamp, ext));
+            let p = output_dir.join(format!("{}.{}", filestem, ext));
             let result =
                 export::encode_video(&ffmpeg_path, &frames, fps, &p, Some(max_bytes), &format)
                     .map(|_| p);
@@ -419,6 +437,10 @@ impl AynimeApp {
             match result {
                 Ok(p) => {
                     log::info!("Encode complete: {}", p.display());
+                    // Copy encoded file to clipboard
+                    if let Err(e) = clipboard::copy_file_to_clipboard(&p) {
+                        log::warn!("Failed to copy file to clipboard: {}", e);
+                    }
                     *s = EncodeStatus::Done(format!(
                         "クリップボードに「収納」しました: {}",
                         p.display()
@@ -552,6 +574,10 @@ impl AynimeApp {
             "範囲: {}x{} @ ({}, {})",
             self.region.width, self.region.height, self.region.x, self.region.y
         ));
+
+        if !self.detected_anime.is_empty() {
+            ui.label(format!("検出: {}", self.detected_anime));
+        }
 
         ui.separator();
 
@@ -879,10 +905,72 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, \
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN \
 THE SOFTWARE.";
 
-fn simple_timestamp() -> String {
+/// Generate a timestamp in the format used by the original app: YYYY-MM-DD_HH-MM-SS-mmm
+fn nime_timestamp() -> String {
     use std::time::SystemTime;
-    let d = SystemTime::now()
+    let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default();
-    format!("{}", d.as_secs())
+    let total_secs = now.as_secs();
+    let millis = now.subsec_millis();
+
+    // Convert to date/time components (UTC — matches original behavior)
+    let secs_per_day = 86400u64;
+    let days = total_secs / secs_per_day;
+    let day_secs = (total_secs % secs_per_day) as u32;
+    let hour = day_secs / 3600;
+    let min = (day_secs % 3600) / 60;
+    let sec = day_secs % 60;
+
+    // Days since epoch to Y-M-D (simplified Gregorian)
+    let (year, month, day) = days_to_ymd(days);
+
+    format!(
+        "{:04}-{:02}-{:02}_{:02}-{:02}-{:02}-{:03}",
+        year, month, day, hour, min, sec, millis
+    )
+}
+
+fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
+    // Epoch is 1970-01-01
+    let mut year = 1970u64;
+    loop {
+        let days_in_year = if is_leap(year) { 366 } else { 365 };
+        if days < days_in_year {
+            break;
+        }
+        days -= days_in_year;
+        year += 1;
+    }
+    let month_days: [u64; 12] = if is_leap(year) {
+        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    } else {
+        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    };
+    let mut month = 1u64;
+    for &md in &month_days {
+        if days < md {
+            break;
+        }
+        days -= md;
+        month += 1;
+    }
+    (year, month, days + 1)
+}
+
+fn is_leap(year: u64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+/// Generate a filename stem: "{anime_name}__{timestamp}" or "capture__{timestamp}"
+/// Matches the original Python app's naming convention.
+fn make_filename_stem(anime_title: &str) -> String {
+    let ts = nime_timestamp();
+    if anime_title.is_empty() {
+        format!("capture__{}", ts)
+    } else {
+        let sanitized = anime_title::sanitize_for_filename(anime_title);
+        let truncated: String = sanitized.chars().take(80).collect();
+        format!("{}__{}", truncated, ts)
+    }
 }

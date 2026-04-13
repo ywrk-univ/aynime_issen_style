@@ -4,7 +4,7 @@
 本家 [えぃにめ一閃流奥義「一閃」](https://github.com/Nu-Pan/aynime_issen_style) を Rust でフルリライトし、**1画面で完結**するように改良。
 
 ## ユーザー向け TL;DR
-- DL は [Releases](https://github.com/ywrk-univ/aynime_issen_style/releases) から `aynime-issen.exe` をダウンロード
+- DL は [最新リリース](https://github.com/ywrk-univ/aynime_issen_style/releases/latest) から `aynime-issen.exe` をダウンロード
 - ダウンロードして実行するだけ（インストール不要、シングルバイナリ 12MB）
 - 初回起動時に FFmpeg を自動ダウンロード（要インターネット接続）
 

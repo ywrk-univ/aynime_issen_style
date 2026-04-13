@@ -154,7 +154,7 @@ impl AynimeApp {
             record_start: None,
             record_fps: 15,
             last_frame_time: None,
-            output_dir: PathBuf::from("./output"),
+            output_dir: ensure_tools::default_output_dir(),
             ffmpeg_path,
             max_file_size_mb: 8.0,
             export_format: ExportFormat::Png,

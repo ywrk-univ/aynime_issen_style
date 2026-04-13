@@ -187,10 +187,9 @@ impl AynimeApp {
         for path in &font_paths {
             if let Ok(font_data) = std::fs::read(path) {
                 log::info!("Loaded Japanese font: {}", path);
-                fonts.font_data.insert(
-                    "japanese".to_owned(),
-                    egui::FontData::from_owned(font_data).into(),
-                );
+                let mut fd = egui::FontData::from_owned(font_data);
+                fd.tweak.y_offset_factor = 0.1; // shift glyphs down to align with UI elements
+                fonts.font_data.insert("japanese".to_owned(), fd.into());
                 fonts
                     .families
                     .entry(egui::FontFamily::Proportional)
@@ -347,7 +346,9 @@ impl AynimeApp {
         let timestamp = simple_timestamp();
 
         let ext = export::format_extension(&self.export_format);
-        let p = self.output_dir.join(format!("capture_{}.{}", timestamp, ext));
+        let p = self
+            .output_dir
+            .join(format!("capture_{}.{}", timestamp, ext));
         let path = match export::save_still(
             &capture.rgba_data,
             capture.width,
@@ -379,7 +380,8 @@ impl AynimeApp {
             self.region,
             self.screen_size
         );
-        self.status_message = "キンキン中...".to_string();
+        self.status_message =
+            "キンキンキンキンキンキンキンキンキンキンキンキンキンキンキンキン！".to_string();
     }
 
     fn stop_recording(&mut self) {
@@ -409,10 +411,9 @@ impl AynimeApp {
 
         std::thread::spawn(move || {
             let p = output_dir.join(format!("capture_{}.{}", timestamp, ext));
-            let result = export::encode_video(
-                &ffmpeg_path, &frames, fps, &p, Some(max_bytes), &format,
-            )
-            .map(|_| p);
+            let result =
+                export::encode_video(&ffmpeg_path, &frames, fps, &p, Some(max_bytes), &format)
+                    .map(|_| p);
 
             let mut s = status.lock().unwrap();
             match result {
@@ -540,8 +541,7 @@ impl AynimeApp {
                 .add_sized([120.0, 32.0], egui::Button::new("構え解除"))
                 .clicked()
             {
-                self.region =
-                    CaptureRegion::new(0, 0, self.screen_size.0, self.screen_size.1);
+                self.region = CaptureRegion::new(0, 0, self.screen_size.0, self.screen_size.1);
                 self.region_border.hide();
                 self.status_message = "構えを解除しました".to_string();
             }
@@ -570,10 +570,7 @@ impl AynimeApp {
             ui.horizontal(|ui| {
                 ui.label("FPS:");
                 let mut fps = self.record_fps as f32;
-                if ui
-                    .add(egui::Slider::new(&mut fps, 5.0..=30.0))
-                    .changed()
-                {
+                if ui.add(egui::Slider::new(&mut fps, 5.0..=30.0)).changed() {
                     self.record_fps = fps as u32;
                 }
             });
@@ -621,8 +618,7 @@ impl AynimeApp {
                     if ui
                         .add_enabled(
                             !is_encoding,
-                            egui::Button::new("キンキン開始")
-                                .min_size(egui::vec2(180.0, 40.0)),
+                            egui::Button::new("キンキンキンキンキンキンキンキンキンキンキンキンキンキンキンキン！").min_size(egui::vec2(180.0, 40.0)),
                         )
                         .clicked()
                     {
@@ -630,10 +626,7 @@ impl AynimeApp {
                     }
                 } else {
                     if ui
-                        .add_sized(
-                            [180.0, 40.0],
-                            egui::Button::new("キンキン停止・収納"),
-                        )
+                        .add_sized([180.0, 40.0], egui::Button::new("停止・収納"))
                         .clicked()
                     {
                         self.stop_recording();
@@ -665,11 +658,7 @@ impl AynimeApp {
                     [capture.width as usize, capture.height as usize],
                     &capture.rgba_data,
                 );
-                ctx.load_texture(
-                    "capture_preview",
-                    color_image,
-                    egui::TextureOptions::LINEAR,
-                )
+                ctx.load_texture("capture_preview", color_image, egui::TextureOptions::LINEAR)
             });
 
             let available = ui.available_size();
@@ -750,10 +739,7 @@ impl AynimeApp {
             ui.horizontal(|ui| {
                 ui.label("デフォルト形式:");
                 for fmt in &self.config.all_formats() {
-                    let selected = self
-                        .config
-                        .default_format
-                        .eq_ignore_ascii_case(fmt);
+                    let selected = self.config.default_format.eq_ignore_ascii_case(fmt);
                     if ui.selectable_label(selected, fmt).clicked() {
                         self.config.default_format = fmt.clone();
                     }
@@ -764,10 +750,7 @@ impl AynimeApp {
             ui.horizontal(|ui| {
                 ui.label("デフォルトFPS:");
                 let mut fps = self.config.default_fps as f32;
-                if ui
-                    .add(egui::Slider::new(&mut fps, 5.0..=30.0))
-                    .changed()
-                {
+                if ui.add(egui::Slider::new(&mut fps, 5.0..=30.0)).changed() {
                     self.config.default_fps = fps as u32;
                 }
             });
@@ -819,9 +802,7 @@ impl AynimeApp {
             {
                 match self.config.save() {
                     Ok(()) => self.status_message = "設定を保存しました".to_string(),
-                    Err(e) => {
-                        self.status_message = format!("設定の保存に失敗: {}", e)
-                    }
+                    Err(e) => self.status_message = format!("設定の保存に失敗: {}", e),
                 }
             }
         });
@@ -832,9 +813,25 @@ impl AynimeApp {
             // ── バージョン ───────────────────────────────────────
             ui.heading("バージョン");
             ui.label(format!("{} v{}", APP_TITLE, env!("CARGO_PKG_VERSION")));
-            ui.label(format!("画面: {}x{}", self.screen_size.0, self.screen_size.1));
-            ui.label(format!("設定: {}", config::AppConfig::config_path_display()));
+            ui.label(format!(
+                "画面: {}x{}",
+                self.screen_size.0, self.screen_size.1
+            ));
+            ui.label(format!(
+                "設定: {}",
+                config::AppConfig::config_path_display()
+            ));
             ui.label(format!("出力: {}", self.output_dir.display()));
+
+            ui.separator();
+
+            // ── 本家様 ───────────────────────────────────────
+
+            ui.heading("えぃにめ一閃流奥義「一閃」（本家様）");
+            ui.horizontal(|ui| {
+                ui.label("GitHub:");
+                ui.hyperlink("https://github.com/Nu-Pan/aynime_issen_style");
+            });
 
             ui.separator();
 
@@ -857,14 +854,6 @@ impl AynimeApp {
             ui.label("  eframe/egui (MIT/Apache-2.0) - GUI");
             ui.label("  windows-rs (MIT/Apache-2.0) - Win32 API");
             ui.label("  image (MIT/Apache-2.0) - 画像処理");
-
-            ui.separator();
-
-            // ── ショートカット ───────────────────────────────────
-            ui.heading("ショートカット");
-            ui.label("構え画面:");
-            ui.label("  ドラッグ - 範囲選択");
-            ui.label("  Esc / 右クリック - キャンセル");
         });
     }
 }

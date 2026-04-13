@@ -13,7 +13,10 @@ use crate::config::AppConfig;
 use crate::hotkey::{HotkeyAction, HotkeyReceiver};
 use crate::overlay::border::RegionBorder;
 use crate::overlay::selection;
-use crate::overlay::window::apply_capture_exclusion_to_egui_window;
+use crate::overlay::window::{
+    apply_capture_exclusion_to_egui_window, clear_window_opacity, find_window_by_title,
+    set_window_opacity,
+};
 use crate::processing::clipboard;
 use crate::processing::ensure_tools;
 use crate::processing::export;
@@ -100,6 +103,17 @@ struct AynimeApp {
 
     /// Global hotkey event queue
     hotkey_rx: HotkeyReceiver,
+
+    /// Mini mode: tiny floating status-only UI
+    mini_mode: bool,
+    /// Opacity for mini mode (0.0 = fully transparent, 1.0 = opaque)
+    mini_opacity: f32,
+    /// Whether opacity has been applied to the Win32 window
+    opacity_applied: bool,
+    /// Saved window size before entering mini mode
+    saved_window_size: Option<egui::Vec2>,
+    /// Whether the mini-mode context menu is currently open
+    mini_menu_open: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -185,6 +199,11 @@ impl AynimeApp {
             current_tab: AppTab::Main,
             detected_anime: String::new(),
             hotkey_rx,
+            mini_mode: false,
+            mini_opacity: 0.7,
+            opacity_applied: false,
+            saved_window_size: None,
+            mini_menu_open: false,
         }
     }
 
@@ -467,6 +486,44 @@ impl AynimeApp {
         });
     }
 
+    // ── Mini mode ───────────────────────────────────────────────
+
+    /// Mini mode base size (compact bar)
+    const MINI_SIZE: egui::Vec2 = egui::vec2(180.0, 36.0);
+
+    fn enter_mini_mode(&mut self, ctx: &egui::Context) {
+        self.mini_mode = true;
+        self.mini_menu_open = false;
+        self.opacity_applied = false;
+        // Save current size before shrinking
+        let info = ctx.input(|i| i.viewport().inner_rect);
+        if let Some(rect) = info {
+            self.saved_window_size = Some(rect.size());
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(Self::MINI_SIZE));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
+    }
+
+    fn exit_mini_mode(&mut self, ctx: &egui::Context) {
+        self.mini_mode = false;
+        self.opacity_applied = false;
+        let size = self.saved_window_size.unwrap_or(egui::vec2(400.0, 620.0));
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(true));
+        // Restore full opacity
+        if let Ok(hwnd) = find_window_by_title(APP_TITLE) {
+            let _ = clear_window_opacity(hwnd);
+        }
+    }
+
+    fn apply_mini_opacity(&mut self) {
+        if let Ok(hwnd) = find_window_by_title(APP_TITLE) {
+            let alpha = (self.mini_opacity * 255.0).clamp(25.0, 255.0) as u8;
+            let _ = set_window_opacity(hwnd, alpha);
+            self.opacity_applied = true;
+        }
+    }
+
     fn record_frame(&mut self) {
         if !self.ensure_capturer() {
             return;
@@ -566,6 +623,17 @@ impl eframe::App for AynimeApp {
             ctx.request_repaint();
         }
 
+        // ── Mini mode opacity ──────────────────────────────────────
+        if self.mini_mode && !self.opacity_applied {
+            self.apply_mini_opacity();
+        }
+
+        // ── Mini mode UI ───────────────────────────────────────────
+        if self.mini_mode {
+            self.ui_mini_mode(ctx);
+            return;
+        }
+
         // ── Main panel ──────────────────────────────────────────────
         egui::CentralPanel::default().show(ctx, |ui| {
             // ── Tab bar ─────────────────────────────────────────────
@@ -573,6 +641,11 @@ impl eframe::App for AynimeApp {
                 ui.selectable_value(&mut self.current_tab, AppTab::Main, "「一閃」");
                 ui.selectable_value(&mut self.current_tab, AppTab::Settings, "設定");
                 ui.selectable_value(&mut self.current_tab, AppTab::Status, "ステータス");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button("ミニ").clicked() {
+                        self.enter_mini_mode(ctx);
+                    }
+                });
             });
             ui.separator();
 
@@ -748,6 +821,82 @@ impl AynimeApp {
         }
     }
 
+    fn ui_mini_mode(&mut self, ctx: &egui::Context) {
+        // Determine border color by status
+        let is_encoding = matches!(
+            *self.encode_status.lock().unwrap(),
+            EncodeStatus::Encoding(_)
+        );
+        let (border_color, label) = if self.is_recording {
+            (egui::Color32::from_rgb(255, 60, 60), "キンキン...")
+        } else if is_encoding {
+            (egui::Color32::from_rgb(255, 200, 40), "処理中...")
+        } else {
+            (egui::Color32::from_rgb(60, 210, 100), "待機中")
+        };
+
+        let bg = egui::Color32::from_rgb(24, 24, 24);
+
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::new()
+                    .fill(bg)
+                    .inner_margin(egui::Margin::symmetric(6, 4))
+                    .corner_radius(6.0)
+                    .stroke(egui::Stroke::new(3.0, border_color)),
+            )
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    // Status label (clickable — main action)
+                    let btn = egui::Button::new(
+                        egui::RichText::new(label)
+                            .color(border_color)
+                            .size(13.0)
+                            .strong(),
+                    )
+                    .fill(bg)
+                    .stroke(egui::Stroke::NONE)
+                    .corner_radius(4.0);
+
+                    let resp = ui.add(btn);
+
+                    // Drag to move the window
+                    if resp.dragged() {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                    }
+
+                    // Left-click: capture / toggle recording
+                    if resp.clicked() {
+                        if self.is_video_format() {
+                            if self.is_recording {
+                                self.stop_recording();
+                            } else {
+                                self.start_recording();
+                            }
+                        } else {
+                            self.do_still_capture();
+                        }
+                    }
+
+                    // Push "拡大表示" to the right
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let back_btn = egui::Button::new(
+                            egui::RichText::new("拡大表示")
+                                .color(egui::Color32::GRAY)
+                                .size(10.0),
+                        )
+                        .fill(egui::Color32::from_rgb(40, 40, 40))
+                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(80, 80, 80)))
+                        .corner_radius(3.0);
+
+                        if ui.add(back_btn).clicked() {
+                            self.exit_mini_mode(ctx);
+                        }
+                    });
+                });
+            });
+    }
+
     fn ui_tab_settings(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui.heading("設定");
@@ -917,25 +1066,29 @@ impl AynimeApp {
 
             // ── ライセンス ───────────────────────────────────────
             ui.heading("ライセンス");
-            ui.label("えぃにめ一閃流奥義「一閃 改」は MIT ライセンスで公開しています。");
+            ui.label("本体コードは MIT ライセンス（原作: NU-Pan、改版: suki-9）で公開しています。");
+            ui.label("ただし gifski (AGPL-3.0) / imagequant (GPL-3.0) を静的リンクしているため、");
+            ui.label("コンパイル済みバイナリは AGPL-3.0-or-later で配布されます。");
             ui.add_space(4.0);
+
+            ui.label("原作 MIT ライセンス:");
             egui::ScrollArea::vertical()
                 .id_salt("license_scroll")
-                .max_height(250.0)
+                .max_height(180.0)
                 .show(ui, |ui| {
                     ui.monospace(MIT_LICENSE_TEXT);
                 });
 
-            ui.add_space(4.0);
-            ui.label("本ソフトウェアは以下のソフトウェアをサブプロセスとして利用します:");
-            ui.label("  FFmpeg (GPL v3) - https://ffmpeg.org/");
+            ui.add_space(8.0);
+            ui.label("サブプロセスとして利用:");
+            ui.label("  FFmpeg (GPL-3.0) — https://ffmpeg.org/");
             ui.add_space(4.0);
             ui.label("主要な依存ライブラリ:");
-            ui.label("  eframe/egui (MIT/Apache-2.0) - GUI");
-            ui.label("  windows-rs (MIT/Apache-2.0) - Win32 API");
-            ui.label("  image (MIT/Apache-2.0) - 画像処理");
-            ui.label("  gifski (AGPL-3.0) - 高品質GIFエンコード");
-            ui.label("  imagequant (GPL-3.0) - 色量子化 (gifski依存)");
+            ui.label("  eframe/egui (MIT/Apache-2.0) — GUI");
+            ui.label("  windows-rs (MIT/Apache-2.0) — Win32 API");
+            ui.label("  image (MIT/Apache-2.0) — 画像処理");
+            ui.label("  gifski (AGPL-3.0) — 高品質GIFエンコード");
+            ui.label("  imagequant (GPL-3.0) — 色量子化 (gifski依存)");
         });
     }
 }

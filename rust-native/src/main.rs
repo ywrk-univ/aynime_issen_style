@@ -437,6 +437,10 @@ impl AynimeApp {
             match result {
                 Ok(p) => {
                     log::info!("Encode complete: {}", p.display());
+                    // Copy encoded file to clipboard
+                    if let Err(e) = clipboard::copy_file_to_clipboard(&p) {
+                        log::warn!("Failed to copy file to clipboard: {}", e);
+                    }
                     *s = EncodeStatus::Done(format!(
                         "クリップボードに「収納」しました: {}",
                         p.display()

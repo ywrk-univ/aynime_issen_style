@@ -98,7 +98,9 @@ pub fn extract_anime_title(text: &str) -> AnimeTitleResult {
         (t, true)
     } else if text.ends_with("Prime Video") {
         let t = text
+            .replace("Amazon.co.jp: ", "")
             .replace("Amazon.co.jp ", "")
+            .replace("を観る | Prime Video", "")
             .replace("を観る Prime Video", "");
         (t, true)
     } else if text.ends_with("ABEMA") {

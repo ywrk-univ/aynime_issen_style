@@ -1,10 +1,11 @@
 //! Copy RGBA image data to the Windows clipboard as a DIB (Device Independent Bitmap).
 
 use anyhow::{Context, Result};
+use std::path::Path;
 use windows::Win32::Foundation::*;
 use windows::Win32::System::DataExchange::*;
 use windows::Win32::System::Memory::*;
-use windows::Win32::System::Ole::CF_DIB;
+use windows::Win32::System::Ole::{CF_DIB, CF_HDROP};
 
 /// Copy RGBA pixel data to the clipboard as a bitmap.
 /// The clipboard will hold a DIB that can be pasted into Discord, Paint, etc.
@@ -72,6 +73,68 @@ unsafe fn copy_rgba_to_clipboard_impl(data: &[u8], width: u32, height: u32) -> R
         let _ = CloseClipboard();
 
         log::info!("Copied {}x{} image to clipboard", width, height);
+        Ok(())
+    }
+}
+
+/// Copy a file to the clipboard as CF_HDROP (file drop).
+/// This allows pasting the file into Discord, Explorer, etc.
+pub fn copy_file_to_clipboard(path: &Path) -> Result<()> {
+    unsafe { copy_file_to_clipboard_impl(path) }
+}
+
+unsafe fn copy_file_to_clipboard_impl(path: &Path) -> Result<()> {
+    unsafe {
+        let abs_path = std::fs::canonicalize(path)
+            .with_context(|| format!("Failed to canonicalize {}", path.display()))?;
+        let path_wide: Vec<u16> = abs_path
+            .to_string_lossy()
+            // canonicalize returns \\?\ prefix on Windows, strip it
+            .trim_start_matches("\\\\?\\")
+            .encode_utf16()
+            .chain(std::iter::once(0)) // null terminator for the path
+            .chain(std::iter::once(0)) // double null terminator for the list
+            .collect();
+
+        // DROPFILES header (20 bytes) + wide string data
+        let header_size = 20usize; // sizeof(DROPFILES)
+        let data_size = path_wide.len() * 2;
+        let total_size = header_size + data_size;
+
+        let hmem = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, total_size)
+            .context("Failed to allocate global memory for HDROP")?;
+        let ptr = GlobalLock(hmem) as *mut u8;
+        if ptr.is_null() {
+            let _ = GlobalFree(Some(hmem));
+            anyhow::bail!("GlobalLock returned null");
+        }
+
+        // DROPFILES struct:
+        //   DWORD pFiles (offset to file list) = 20
+        //   POINT pt = {0, 0}
+        //   BOOL fNC = FALSE
+        //   BOOL fWide = TRUE
+        *(ptr as *mut u32) = header_size as u32; // pFiles
+        // pt.x = 0, pt.y = 0 (already zeroed)
+        // fNC = 0 (already zeroed)
+        *(ptr.add(16) as *mut u32) = 1; // fWide = TRUE
+
+        // Copy wide string file path after header
+        std::ptr::copy_nonoverlapping(
+            path_wide.as_ptr() as *const u8,
+            ptr.add(header_size),
+            data_size,
+        );
+
+        let _ = GlobalUnlock(hmem);
+
+        OpenClipboard(None).context("Failed to open clipboard")?;
+        let _ = EmptyClipboard();
+        SetClipboardData(CF_HDROP.0 as u32, Some(HANDLE(hmem.0)))
+            .context("Failed to set clipboard data (HDROP)")?;
+        let _ = CloseClipboard();
+
+        log::info!("Copied file to clipboard: {}", abs_path.display());
         Ok(())
     }
 }
